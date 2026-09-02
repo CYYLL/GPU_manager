@@ -18,6 +18,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    mode = Column(String, default="llm")  # "llm" or "traditional"（注册时按 MODE_DEFAULT 覆盖）
 
     container_instances = relationship("ContainerInstance", back_populates="user")
     gpu_allocations = relationship("GpuAllocation", back_populates="user")
@@ -56,6 +57,8 @@ class ContainerInstance(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     stopped_at = Column(DateTime, nullable=True)
+    env_vars = Column(JSON, default=dict)  # 重建时还原
+    cleanup_protected = Column(Boolean, default=False)  # 清理候选排除
 
     user = relationship("User", back_populates="container_instances")
     gpu_allocations = relationship("GpuAllocation", back_populates="container_instance")
@@ -73,3 +76,71 @@ class GpuAllocation(Base):
 
     container_instance = relationship("ContainerInstance", back_populates="gpu_allocations")
     user = relationship("User", back_populates="gpu_allocations")
+
+
+class ContainerEvent(Base):
+    __tablename__ = "container_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    container_instance_id = Column(Integer, ForeignKey("container_instances.id"), index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    event = Column(String, nullable=False)  # create/start/stop/delete/external_stop/rebuild
+    source = Column(String, nullable=False)  # llm/manual/agent
+    detail = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    container_instance = relationship("ContainerInstance")
+    user = relationship("User")
+
+
+class DiskSnapshot(Base):
+    __tablename__ = "disk_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime, default=datetime.utcnow, index=True)
+    total_bytes = Column(Integer, nullable=False)
+    used_bytes = Column(Integer, nullable=False)
+    free_bytes = Column(Integer, nullable=False)
+    usage_percent = Column(Float, nullable=False)
+    docker_container_reclaimable_bytes = Column(Integer, default=0)
+    docker_image_reclaimable_bytes = Column(Integer, default=0)
+    docker_build_cache_reclaimable_bytes = Column(Integer, default=0)
+
+
+class CleanupLog(Base):
+    __tablename__ = "cleanup_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime, default=datetime.utcnow, index=True)
+    container_instance_id = Column(Integer, ForeignKey("container_instances.id"), index=True, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
+    action = Column(String, nullable=False)  # stop/remove/skip
+    reason = Column(Text, default="")
+    decision_source = Column(String, default="llm")  # llm/rule_fallback
+    freed_bytes = Column(Integer, default=0)
+    success = Column(Boolean, default=False)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    role = Column(String, nullable=False)  # user/assistant
+    content = Column(Text, default="")
+    tool_calls = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User")
+
+
+class AdminAlert(Base):
+    __tablename__ = "admin_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime, default=datetime.utcnow, index=True)
+    type = Column(String, default="capacity")
+    level = Column(String, default="warning")  # warning/critical
+    message = Column(Text, default="")
+    meta = Column(JSON, default=dict)
+    resolved_at = Column(DateTime, nullable=True)

@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
@@ -21,7 +23,11 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Username already registered")
     if len(user.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    return user_crud.create_user(db, user)
+    db_user = user_crud.create_user(db, user)
+    db_user.mode = os.environ.get("MODE_DEFAULT", "llm")
+    db.commit()
+    db.refresh(db_user)
+    return db_user
 
 
 @router.post("/api/users/login", response_model=schemas.Token)
