@@ -82,15 +82,12 @@ class ContainerEvent(Base):
     __tablename__ = "container_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    container_instance_id = Column(Integer, ForeignKey("container_instances.id"), index=True, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    container_instance_id = Column(Integer, index=True, nullable=False)
+    user_id = Column(Integer, index=True, nullable=False)
     event = Column(String, nullable=False)  # create/start/stop/delete/external_stop/rebuild
     source = Column(String, nullable=False)  # llm/manual/agent
     detail = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-
-    container_instance = relationship("ContainerInstance")
-    user = relationship("User")
 
 
 class DiskSnapshot(Base):
@@ -112,8 +109,8 @@ class CleanupLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     ts = Column(DateTime, default=datetime.utcnow, index=True)
-    container_instance_id = Column(Integer, ForeignKey("container_instances.id"), index=True, nullable=True)
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=True)
+    container_instance_id = Column(Integer, index=True, nullable=True)
+    user_id = Column(Integer, index=True, nullable=True)
     action = Column(String, nullable=False)  # stop/remove/skip
     reason = Column(Text, default="")
     decision_source = Column(String, default="llm")  # llm/rule_fallback
@@ -125,13 +122,11 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    user_id = Column(Integer, index=True, nullable=False)
     role = Column(String, nullable=False)  # user/assistant
     content = Column(Text, default="")
     tool_calls = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-
-    user = relationship("User")
 
 
 class AdminAlert(Base):
