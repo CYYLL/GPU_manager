@@ -1,0 +1,14 @@
+[Unit]
+Description=GPU Resource Manager Frontend (Static Server)
+After=network.target
+
+[Service]
+Type=simple
+User=amax
+Environment="NVM_DIR=/amax/.nvm"
+ExecStart=/bin/bash -c 'source $NVM_DIR/nvm.sh && npx serve -s /amax/gpu_manager/frontend/build -l 3000 --no-clipboard'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
