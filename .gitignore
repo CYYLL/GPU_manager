@@ -3,3 +3,6 @@ __pycache__/
 *.db
 node_modules/
 frontend/node_modules/
+
+# SDD scratch (briefs/reports/ledger)
+.superpowers/
