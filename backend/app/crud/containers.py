@@ -225,3 +225,25 @@ def delete_container_instance(db: Session, instance_id: int) -> bool:
     db.delete(instance)
     db.commit()
     return True
+
+
+def record_container_event(db: Session, instance_id: int, user_id: int,
+                           event: str, source: str = "manual", detail: str = ""):
+    """Record a lifecycle event. Commits independently (event write is its own
+    short transaction — external calls never wrap DB work)."""
+    db.add(models.ContainerEvent(
+        container_instance_id=instance_id,
+        user_id=user_id,
+        event=event,
+        source=source,
+        detail=detail,
+    ))
+    db.commit()
+
+
+def get_last_used(db: Session, instance_id: int):
+    """Most recent ContainerEvent timestamp for an instance (cleanup LRU basis)."""
+    ev = db.query(models.ContainerEvent).filter(
+        models.ContainerEvent.container_instance_id == instance_id
+    ).order_by(models.ContainerEvent.created_at.desc()).first()
+    return ev.created_at if ev else None

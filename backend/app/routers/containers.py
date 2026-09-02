@@ -133,6 +133,7 @@ def start_container(
 
             # 8. Create GpuAllocation records
             container_crud.create_allocations(db, gpu_ids, instance.id, current_user.id)
+            container_crud.record_container_event(db, instance.id, current_user.id, "create", "manual")
     except TimeoutError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -193,6 +194,8 @@ def stop_container(
     # Update instance status
     container_crud.stop_container_instance(db, instance.id)
 
+    container_crud.record_container_event(db, instance.id, current_user.id, "stop", "manual")
+
     return {"message": "Container stopped successfully"}
 
 
@@ -226,6 +229,8 @@ def remove_container(
 
     # Delete DB record
     container_crud.delete_container_instance(db, instance.id)
+
+    container_crud.record_container_event(db, instance.id, current_user.id, "delete", "manual")
 
     return {"message": "Container deleted successfully"}
 
@@ -290,6 +295,8 @@ def start_stopped_container(
 
             # Update status
             container_crud.start_container_instance(db, instance.id)
+
+            container_crud.record_container_event(db, instance.id, current_user.id, "start", "manual")
     except TimeoutError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
