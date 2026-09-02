@@ -129,6 +129,7 @@ def start_container(
                 memory_limit=req.memory_limit,
                 assigned_port=assigned_port,
                 access_password=access_password,
+                env_vars=req.env_vars,
             )
 
             # 8. Create GpuAllocation records

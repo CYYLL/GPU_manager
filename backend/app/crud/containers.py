@@ -92,6 +92,7 @@ def create_container_instance(
     memory_limit: Optional[int] = None,
     assigned_port: Optional[int] = None,
     access_password: Optional[str] = None,
+    env_vars: Optional[dict] = None,
 ) -> models.ContainerInstance:
     now = datetime.utcnow()
     db_instance = models.ContainerInstance(
@@ -105,6 +106,7 @@ def create_container_instance(
         memory_limit=memory_limit,
         assigned_port=assigned_port,
         access_password=access_password,
+        env_vars=env_vars or {},
         started_at=now,
     )
     db.add(db_instance)

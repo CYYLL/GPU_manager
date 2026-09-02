@@ -58,3 +58,25 @@ def test_get_last_used_none_when_no_events(db):
     db.refresh(u)
     inst = _mk(db, u)
     assert crud.get_last_used(db, inst.id) is None
+
+
+def test_create_instance_persists_env_vars(db):
+    u = models.User(username="frank", hashed_password="x", role="user", gpu_quota=4)
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    inst = crud.create_container_instance(
+        db=db,
+        user_id=u.id,
+        container_id="f" * 64,
+        image="basic:v1",
+        gpu_ids=[0],
+        gpu_count=1,
+        env_vars={"DEBUG": "1"},
+    )
+    assert inst.env_vars == {"DEBUG": "1"}
+    # Reload from DB to confirm it was actually persisted, not just in-memory.
+    reloaded = db.query(models.ContainerInstance).filter(
+        models.ContainerInstance.id == inst.id
+    ).first()
+    assert reloaded.env_vars == {"DEBUG": "1"}
