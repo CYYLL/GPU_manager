@@ -35,8 +35,12 @@ def start_container(
     req: schemas.ContainerStartRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    source: str = "manual",
 ):
+    return _start_container_impl(req, current_user, db, "manual")
+
+
+def _start_container_impl(req: schemas.ContainerStartRequest, current_user: models.User,
+                          db: Session, source: str = "manual"):
     # 1. Validate image exists
     image_record = container_crud.get_image_by_id(db, req.image_id)
     if not image_record:
@@ -157,12 +161,13 @@ def start_container(
 
 
 @router.delete("/api/containers/{instance_id}", response_model=schemas.Message)
-def stop_container(
-    instance_id: int,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    source: str = "manual",
-):
+def stop_container(instance_id: int, current_user: models.User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    return _stop_container_impl(instance_id, current_user, db, "manual")
+
+
+def _stop_container_impl(instance_id: int, current_user: models.User, db: Session,
+                         source: str = "manual"):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Container instance not found")
@@ -207,8 +212,12 @@ def remove_container(
     instance_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    source: str = "manual",
 ):
+    return _remove_container_impl(instance_id, current_user, db, "manual")
+
+
+def _remove_container_impl(instance_id: int, current_user: models.User, db: Session,
+                           source: str = "manual"):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Container instance not found")
@@ -244,8 +253,12 @@ def start_stopped_container(
     instance_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    source: str = "manual",
 ):
+    return _start_stopped_container_impl(instance_id, current_user, db, "manual")
+
+
+def _start_stopped_container_impl(instance_id: int, current_user: models.User, db: Session,
+                                  source: str = "manual"):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Container instance not found")

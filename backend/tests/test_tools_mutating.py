@@ -87,6 +87,44 @@ def test_delete_container_tool(monkeypatch, db):
 
 def test_tools_list_has_mutating_schemas():
     names = {t["name"] for t in agent_tools.TOOLS}
-    assert {"create_container", "start_container", "stop_container", "delete_container"} <= names
+    assert {"create_container", "start_container", "stop_container", "delete_container", "list_images"} <= names
     by_name = {t["name"]: t for t in agent_tools.TOOLS}
     assert by_name["stop_container"]["input_schema"]["required"] == ["id"]
+
+
+def test_create_container_happy_path_returns_password(monkeypatch, db, tmp_path):
+    from app.routers import containers as containers_router
+    u = _mk_user(db)
+    im = models.GpuImage(name="pytorch:latest", image="docker.io/library/pytorch:latest", min_gpu=1)
+    db.add(im)
+    db.commit()
+    db.refresh(im)
+
+    # isolated workspace mount root so the impl never writes to the real /amax tree
+    monkeypatch.setenv("CONTAINER_MOUNT_ROOT", str(tmp_path))
+    # docker_runner.start_container returns a fake docker id + running status
+    stub = mock.Mock()
+    stub.start_container.return_value = ("d" * 64, "running")
+    monkeypatch.setattr(containers_router, "docker_runner", stub)
+    # idle GPUs: availability + busy-GPU checks pass for a single GPU
+    monkeypatch.setattr(containers_router.gpu_monitor, "get_gpu_count", lambda: 1)
+    monkeypatch.setattr(
+        containers_router.gpu_monitor, "get_gpu_status",
+        lambda *a, **k: [{"id": 0, "memory_utilization": 0.0, "gpu_utilization": 0}],
+    )
+
+    ex = agent_tools.ToolExecutor(db, u)
+    ok, text = ex.run("create_container", {"image_id": im.id, "gpu_count": 1})
+    assert ok is True
+    inst = db.query(models.ContainerInstance).filter(
+        models.ContainerInstance.user_id == u.id
+    ).first()
+    assert inst is not None
+    assert f"id={inst.id}" in text
+    assert f"port={inst.assigned_port}" in text
+    assert inst.access_password
+    assert f"password={inst.access_password}" in text
+    ev = db.query(models.ContainerEvent).filter(
+        models.ContainerEvent.container_instance_id == inst.id
+    ).order_by(models.ContainerEvent.created_at.desc()).first()
+    assert ev.event == "create" and ev.source == "llm"

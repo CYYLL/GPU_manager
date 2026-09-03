@@ -43,6 +43,33 @@ def _mk_inst(db, user, status="running", protected=False, container_id=None):
     return inst
 
 
+def _mk_image(db, name="pytorch:latest"):
+    im = models.GpuImage(name=name, image=f"docker.io/library/{name}", min_gpu=1)
+    db.add(im)
+    db.commit()
+    db.refresh(im)
+    return im
+
+
+def test_list_images(db):
+    u = _mk_user(db)
+    im = _mk_image(db)
+    ex = agent_tools.ToolExecutor(db, u)
+    ok, text = ex.run("list_images", {})
+    assert ok is True
+    assert f"id={im.id}" in text
+    assert im.name in text
+    assert "min_gpu" in text
+
+
+def test_list_images_empty(db):
+    u = _mk_user(db)
+    ex = agent_tools.ToolExecutor(db, u)
+    ok, text = ex.run("list_images", {})
+    assert ok is True
+    assert "没有可用镜像" in text
+
+
 def test_list_containers_only_own(monkeypatch, db):
     u = _mk_user(db)
     _mk_inst(db, u)

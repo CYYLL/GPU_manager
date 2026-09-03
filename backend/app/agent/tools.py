@@ -1,14 +1,15 @@
 """Agent tools: read-only queries + protection toggle + container lifecycle.
 
-Lifecycle tools delegate to the containers router handlers (source="llm") so
-ownership / quota / availability checks live in exactly one place. The LLM may
-call these via the chat route; it can never bypass checks.
+Lifecycle tools delegate to the containers router _impl handlers
+(source="llm") so ownership / quota / availability checks live in exactly one
+place. The LLM may call these via the chat route; it can never bypass checks.
 """
 import os
 import shutil
 from typing import List, Dict, Tuple
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -30,13 +31,16 @@ TOOLS: List[Dict] = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_disk_status", "description": "查询宿主磁盘水位",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "list_images", "description": "列出可用的预设镜像（创建容器时用其中的 id）",
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "set_container_protection", "description": "设置或取消某容器的清理保护",
      "input_schema": {"type": "object", "properties": {
          "id": {"type": "integer"}, "protected": {"type": "boolean"}},
          "required": ["id", "protected"]}},
     {"name": "create_container", "description": "创建并启动一个新容器",
      "input_schema": {"type": "object", "properties": {
-         "image_id": {"type": "integer"}, "gpu_count": {"type": "integer", "default": 1},
+         "image_id": {"type": "integer"},
+         "gpu_count": {"type": "integer", "minimum": 1, "maximum": 4, "default": 1},
          "cpu_limit": {"type": "number"}, "memory_limit": {"type": "integer"},
          "env_vars": {"type": "object"}}, "required": ["image_id"]}},
     {"name": "start_container", "description": "启动一个已停止的容器",
@@ -45,7 +49,7 @@ TOOLS: List[Dict] = [
     {"name": "stop_container", "description": "停止一个运行中的容器",
      "input_schema": {"type": "object", "properties": {
          "id": {"type": "integer"}}, "required": ["id"]}},
-    {"name": "delete_container", "description": "删除一个容器（保留工作区数据）",
+    {"name": "delete_container", "description": "删除一个容器（不可恢复，会 force 移除；保留工作区数据但无配置快照；操作前确认）",
      "input_schema": {"type": "object", "properties": {
          "id": {"type": "integer"}}, "required": ["id"]}},
 ]
@@ -113,6 +117,12 @@ class ToolExecutor:
         return True, (f"total={usage.total} used={usage.used} free={usage.free} "
                       f"usage_pct={pct:.1f}%")
 
+    def _tool_list_images(self, inp) -> Tuple[bool, str]:
+        images = container_crud.get_images(self.db)
+        lines = [f"- id={im.id} name={im.name} image={im.image} min_gpu={im.min_gpu}"
+                 for im in images]
+        return True, "\n".join(lines) if lines else "（没有可用镜像）"
+
     def _tool_set_container_protection(self, inp) -> Tuple[bool, str]:
         inst = container_crud.get_container_instance(self.db, int(inp["id"]))
         if inst is None:
@@ -123,39 +133,41 @@ class ToolExecutor:
         self.db.commit()
         return True, f"已{'设置' if inp['protected'] else '取消'}保护"
 
-    # ── mutating tools (delegate to lifecycle handlers; HTTPException → (False, detail))
+    # ── mutating tools (delegate to lifecycle _impl handlers; HTTPException → (False, detail))
     def _tool_start_container(self, inp) -> Tuple[bool, str]:
         try:
-            result = containers_router.start_stopped_container(int(inp["id"]), self.user, self.db, source="llm")
+            result = containers_router._start_stopped_container_impl(int(inp["id"]), self.user, self.db, "llm")
             return True, result.get("message", "started")
         except HTTPException as e:
             return False, e.detail
 
     def _tool_stop_container(self, inp) -> Tuple[bool, str]:
         try:
-            result = containers_router.stop_container(int(inp["id"]), self.user, self.db, source="llm")
+            result = containers_router._stop_container_impl(int(inp["id"]), self.user, self.db, "llm")
             return True, result.get("message", "stopped")
         except HTTPException as e:
             return False, e.detail
 
     def _tool_delete_container(self, inp) -> Tuple[bool, str]:
         try:
-            result = containers_router.remove_container(int(inp["id"]), self.user, self.db, source="llm")
+            result = containers_router._remove_container_impl(int(inp["id"]), self.user, self.db, "llm")
             return True, result.get("message", "deleted")
         except HTTPException as e:
             return False, e.detail
 
     def _tool_create_container(self, inp) -> Tuple[bool, str]:
-        req = schemas.ContainerStartRequest(
-            image_id=int(inp["image_id"]),
-            gpu_count=int(inp.get("gpu_count", 1)),
-            cpu_limit=inp.get("cpu_limit"),
-            memory_limit=inp.get("memory_limit"),
-            env_vars=inp.get("env_vars") or {},
-        )
         try:
-            resp = containers_router.start_container(req, self.user, self.db, source="llm")
-            return True, (f"容器已创建 id={resp.id} image={resp.image} "
-                          f"status={resp.status} port={resp.assigned_port}")
+            req = schemas.ContainerStartRequest(
+                image_id=int(inp["image_id"]),
+                gpu_count=int(inp.get("gpu_count", 1)),
+                cpu_limit=inp.get("cpu_limit"),
+                memory_limit=inp.get("memory_limit"),
+                env_vars=inp.get("env_vars") or {},
+            )
+            resp = containers_router._start_container_impl(req, self.user, self.db, "llm")
+            return True, (f"容器已创建 id={resp.id} image={resp.image} status={resp.status} "
+                          f"port={resp.assigned_port} password={resp.access_password}")
         except HTTPException as e:
             return False, e.detail
+        except ValidationError as e:
+            return False, str(e)

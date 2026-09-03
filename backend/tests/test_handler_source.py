@@ -45,7 +45,7 @@ def test_stop_records_source_llm(monkeypatch, db):
     stub.is_container_running.return_value = False
     monkeypatch.setattr(containers_router, "docker_runner", stub)
 
-    containers_router.stop_container(inst.id, u, db, source="llm")
+    containers_router._stop_container_impl(inst.id, u, db, "llm")
 
     ev = db.query(models.ContainerEvent).filter(
         models.ContainerEvent.container_instance_id == inst.id

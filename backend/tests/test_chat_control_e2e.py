@@ -56,6 +56,7 @@ def test_chat_stop_container_flow(monkeypatch, db):
     assert out["reply"] == "好的，容器已停止"
     assert out["tool_trace"][0]["tool"] == "stop_container"
     assert out["tool_trace"][0]["ok"] is True
+    docker_stub.stop_container.assert_called_once()
     db.refresh(inst)
     assert inst.status == "stopped"
     # event recorded as llm source
