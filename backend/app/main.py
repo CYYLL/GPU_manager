@@ -8,7 +8,7 @@ from os.path import dirname, abspath, join
 from dotenv import load_dotenv
 
 from .database import engine, Base
-from .routers import users, gpus, containers, mode
+from .routers import users, gpus, containers, mode, agent
 
 # ── Project root (derived from backend/app/main.py → project root) ──
 _BACKEND_DIR = dirname(dirname(abspath(__file__)))  # backend/
@@ -34,6 +34,7 @@ app.include_router(users.router)
 app.include_router(gpus.router)
 app.include_router(containers.router)
 app.include_router(mode.router)
+app.include_router(agent.router)
 
 
 # Serve frontend production build
