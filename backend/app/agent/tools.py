@@ -46,8 +46,11 @@ class ToolExecutor:
         if handler is None:
             return False, f"Unknown tool: {name}"
         try:
-            return handler(inp)
-        except Exception as e:  # surface to LLM, never crash the request
+            result = handler(inp)
+            self.db.commit()  # release any implicit read txn before the next external call
+            return result
+        except Exception as e:
+            self.db.rollback()  # surface to LLM, never crash, never leak an open txn
             return False, f"tool error: {e}"
 
     def _owner_or_admin(self, inst) -> bool:

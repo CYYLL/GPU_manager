@@ -57,6 +57,26 @@ def test_chat_returns_reply_and_persists(monkeypatch, db):
     assert len(msgs) == 2  # user + assistant
 
 
+def test_chat_llm_failure_persists_fallback(monkeypatch, db):
+    u = _mk_user(db)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("upstream down")
+
+    monkeypatch.setattr(agent_router, "run_agent", _boom)
+
+    out = agent_router.chat(agent_router.ChatRequest(message="hi"), u, db)
+
+    # no 500: fallback assistant reply returned
+    assert out["reply"] == "模型调用失败，请稍后重试"
+    assert out["tool_trace"] == []
+    # history alternates: user then assistant fallback
+    msgs = db.query(models.ChatMessage).filter(
+        models.ChatMessage.user_id == u.id
+    ).order_by(models.ChatMessage.id.asc()).all()
+    assert [m.role for m in msgs] == ["user", "assistant"]
+
+
 def test_session_history_and_clear(db):
     u = _mk_user(db)
     db.add(models.ChatMessage(user_id=u.id, role="user", content="hello"))

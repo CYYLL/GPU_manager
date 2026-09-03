@@ -7,15 +7,17 @@ from os.path import dirname, abspath, join
 
 from dotenv import load_dotenv
 
-from .database import engine, Base
-from .routers import users, gpus, containers, mode, agent
-
 # ── Project root (derived from backend/app/main.py → project root) ──
 _BACKEND_DIR = dirname(dirname(abspath(__file__)))  # backend/
 PROJECT_ROOT = dirname(_BACKEND_DIR)  # project root (parent of backend/)
 
-# ── Load .env from project root ──
+# ── Load .env from project root BEFORE importing the app package, since
+#    module-level constructors (agent.llm_client.LLMClient, tools.DockerRunner)
+#    read env vars at import time. ──
 load_dotenv(join(PROJECT_ROOT, ".env"))
+
+from .database import engine, Base
+from .routers import users, gpus, containers, mode, agent
 
 # Create all tables
 Base.metadata.create_all(bind=engine)

@@ -3,7 +3,7 @@
 External LLM calls happen between short DB transactions (caller manages DB);
 this function is pure orchestration and holds no session.
 """
-from typing import List, Dict, Callable, Optional
+from typing import List, Dict, Callable
 
 from .llm_client import LLMClient, LLMResult
 
@@ -30,6 +30,7 @@ def run_agent(llm_client: LLMClient, system: str, messages: List[Dict],
             working.append({"role": "user",
                             "content": [{"type": "tool_result", "tool_use_id": call["id"],
                                          "content": text}]})
-    # tool budget exhausted; take one final answer turn
-    final = llm_client.complete(system, working, tools)
+    # tool budget exhausted; take one final forced-answer turn (no tools, so a
+    # model that keeps insisting on tool_use cannot return empty text)
+    final = llm_client.complete(system, working, [])
     return {"reply": final.text or "已达到单次对话工具调用上限", "tool_trace": trace}

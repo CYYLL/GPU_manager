@@ -71,6 +71,26 @@ def test_get_status_denies_other_owner(monkeypatch, db):
     assert "not authorized" in text.lower() or "未授权" in text
 
 
+def test_get_gpu_status_unreadable(monkeypatch, db):
+    u = _mk_user(db)
+    stub = type("GpuMonitorStub", (),
+                {"get_gpu_status": lambda self, allocated_gpu_ids=None: []})()
+    monkeypatch.setattr(agent_tools, "gpu_monitor", stub)
+
+    ex = agent_tools.ToolExecutor(db, u)
+    ok, text = ex.run("get_gpu_status", {})
+    assert ok is True
+    assert "无法读取" in text
+
+
+def test_unknown_tool(db):
+    u = _mk_user(db)
+    ex = agent_tools.ToolExecutor(db, u)
+    ok, text = ex.run("nope", {})
+    assert ok is False
+    assert "Unknown tool" in text
+
+
 def test_set_protection_persists(db):
     u = _mk_user(db)
     inst = _mk_inst(db, u, protected=False)

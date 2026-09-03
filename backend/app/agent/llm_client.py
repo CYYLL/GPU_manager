@@ -27,7 +27,8 @@ class LLMClient:
             or "claude-sonnet-4-6"
         )
         self._stream = os.environ.get("LLM_STREAMING", "auto").lower()
-        self.client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
+        self.client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url,
+                                          timeout=60.0)
 
     def stream_enabled(self) -> bool:
         """auto → True (native Anthropic streaming); true/false override."""

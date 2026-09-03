@@ -1,5 +1,4 @@
 """LLMClient wraps anthropic; env-configurable; parses text + tool_use blocks."""
-import os
 from unittest import mock
 
 import pytest
@@ -60,3 +59,34 @@ def test_env_defaults_to_anthropic_vars(monkeypatch):
 
     client = LLMClient()
     assert client.model == "sonnet-1"
+
+
+def test_llm_vars_override_anthropic_vars(monkeypatch):
+    captured = {}
+
+    class _RecordingAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.messages = mock.Mock()
+
+    monkeypatch.setattr("anthropic.Anthropic", _RecordingAnthropic)
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://anthropic")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic-model")
+
+    client = LLMClient()
+
+    # LLM_* wins for model resolution
+    assert client.model == "llm-model"
+    # Anthropic is constructed with the resolved LLM_* api_key / base_url
+    assert captured["api_key"] == "llm-key"
+    assert captured["base_url"] == "http://llm"
+    assert captured.get("timeout") == 60.0
+    # resolved model is what gets sent on calls (not the ANTHROPIC_* model)
+    client.client.messages.create.return_value.content = []
+    client.complete("sys", [{"role": "user", "content": "hi"}])
+    assert client.client.messages.create.call_args.kwargs["model"] == "llm-model"
+

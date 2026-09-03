@@ -63,8 +63,15 @@ def chat(req: ChatRequest,
     # read/commit happened above; the LLM + tool round runs outside a txn
     _save(db, current_user.id, "user", req.message)
     executor = ToolExecutor(db, current_user)
-    out = run_agent(llm_client, SYSTEM_PROMPT, messages, TOOLS,
-                    executor.run, max_calls=5)
+    try:
+        out = run_agent(llm_client, SYSTEM_PROMPT, messages, TOOLS,
+                        executor.run, max_calls=5)
+    except Exception:
+        # Never 500: persist a fallback assistant reply so history never ends
+        # with consecutive user turns, then surface it to the caller.
+        fallback = "模型调用失败，请稍后重试"
+        _save(db, current_user.id, "assistant", fallback)
+        return {"reply": fallback, "tool_trace": []}
     _save(db, current_user.id, "assistant", out["reply"])
     return out
 
