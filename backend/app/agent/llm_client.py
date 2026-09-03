@@ -54,3 +54,46 @@ class LLMClient:
                 tool_calls.append({"id": block.id, "name": block.name, "input": block.input})
         return LLMResult(text="".join(text_parts), tool_calls=tool_calls,
                          stop_reason=getattr(resp, "stop_reason", None))
+
+    def stream_complete(self, system, messages, tools=None, max_tokens=1024):
+        """Yield events: {'type':'text','delta'} and {'type':'tool_use','id','name','input'}.
+
+        If stream_enabled() is False, emulate by calling complete() once and yielding
+        the whole reply as one text delta plus tool calls — the SSE client logic
+        does not fork between real and emulated streaming.
+        """
+        if not self.stream_enabled():
+            result = self.complete(system, messages, tools, max_tokens=max_tokens)
+            if result.text:
+                yield {"type": "text", "delta": result.text}
+            for tc in result.tool_calls:
+                yield {"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["input"]}
+            return
+
+        kwargs = dict(model=self.model, max_tokens=max_tokens, system=system, messages=messages)
+        if tools:
+            kwargs["tools"] = tools
+        import json as _json
+        with self.client.messages.stream(**kwargs) as stream:
+            tool_acc = None  # {'id','name','input_json'} accumulating partial_json
+            for event in stream:
+                et = getattr(event, "type", "")
+                if et == "content_block_start":
+                    block = getattr(event, "block", None)
+                    if getattr(block, "type", "") == "tool_use":
+                        tool_acc = {"id": block.id, "name": block.name, "input_json": ""}
+                elif et == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    dt = getattr(delta, "type", "")
+                    if dt == "text_delta":
+                        yield {"type": "text", "delta": getattr(delta, "text", "")}
+                    elif dt == "input_json_delta" and tool_acc is not None:
+                        tool_acc["input_json"] += getattr(delta, "partial_json", "")
+                elif et == "content_block_stop" and tool_acc is not None:
+                    try:
+                        inp = _json.loads(tool_acc["input_json"] or "{}")
+                    except Exception:
+                        inp = {}
+                    yield {"type": "tool_use", "id": tool_acc["id"],
+                           "name": tool_acc["name"], "input": inp}
+                    tool_acc = None
