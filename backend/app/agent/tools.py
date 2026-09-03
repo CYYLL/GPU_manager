@@ -1,18 +1,21 @@
-"""Agent tools: read-only queries + protection toggle.
+"""Agent tools: read-only queries + protection toggle + container lifecycle.
 
-Each tool reuses crud / DockerRunner / gpu_monitor with ownership checks.
-The LLM may call these via the chat route; it can never bypass checks.
+Lifecycle tools delegate to the containers router handlers (source="llm") so
+ownership / quota / availability checks live in exactly one place. The LLM may
+call these via the chat route; it can never bypass checks.
 """
 import os
 import shutil
 from typing import List, Dict, Tuple
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, schemas
 from ..crud import containers as container_crud
 from ..services.docker_runner import DockerRunner
 from ..services.gpu_monitor import get_gpu_monitor
+from ..routers import containers as containers_router
 
 docker_runner = DockerRunner()
 gpu_monitor = get_gpu_monitor()
@@ -31,6 +34,20 @@ TOOLS: List[Dict] = [
      "input_schema": {"type": "object", "properties": {
          "id": {"type": "integer"}, "protected": {"type": "boolean"}},
          "required": ["id", "protected"]}},
+    {"name": "create_container", "description": "创建并启动一个新容器",
+     "input_schema": {"type": "object", "properties": {
+         "image_id": {"type": "integer"}, "gpu_count": {"type": "integer", "default": 1},
+         "cpu_limit": {"type": "number"}, "memory_limit": {"type": "integer"},
+         "env_vars": {"type": "object"}}, "required": ["image_id"]}},
+    {"name": "start_container", "description": "启动一个已停止的容器",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "stop_container", "description": "停止一个运行中的容器",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "delete_container", "description": "删除一个容器（保留工作区数据）",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
 ]
 
 _SRC = "llm"
@@ -105,3 +122,40 @@ class ToolExecutor:
         inst.cleanup_protected = bool(inp["protected"])
         self.db.commit()
         return True, f"已{'设置' if inp['protected'] else '取消'}保护"
+
+    # ── mutating tools (delegate to lifecycle handlers; HTTPException → (False, detail))
+    def _tool_start_container(self, inp) -> Tuple[bool, str]:
+        try:
+            result = containers_router.start_stopped_container(int(inp["id"]), self.user, self.db, source="llm")
+            return True, result.get("message", "started")
+        except HTTPException as e:
+            return False, e.detail
+
+    def _tool_stop_container(self, inp) -> Tuple[bool, str]:
+        try:
+            result = containers_router.stop_container(int(inp["id"]), self.user, self.db, source="llm")
+            return True, result.get("message", "stopped")
+        except HTTPException as e:
+            return False, e.detail
+
+    def _tool_delete_container(self, inp) -> Tuple[bool, str]:
+        try:
+            result = containers_router.remove_container(int(inp["id"]), self.user, self.db, source="llm")
+            return True, result.get("message", "deleted")
+        except HTTPException as e:
+            return False, e.detail
+
+    def _tool_create_container(self, inp) -> Tuple[bool, str]:
+        req = schemas.ContainerStartRequest(
+            image_id=int(inp["image_id"]),
+            gpu_count=int(inp.get("gpu_count", 1)),
+            cpu_limit=inp.get("cpu_limit"),
+            memory_limit=inp.get("memory_limit"),
+            env_vars=inp.get("env_vars") or {},
+        )
+        try:
+            resp = containers_router.start_container(req, self.user, self.db, source="llm")
+            return True, (f"容器已创建 id={resp.id} image={resp.image} "
+                          f"status={resp.status} port={resp.assigned_port}")
+        except HTTPException as e:
+            return False, e.detail
