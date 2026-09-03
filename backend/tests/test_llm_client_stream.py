@@ -12,7 +12,7 @@ def _sdk_event(kind, **kw):
         block.type = kw["block_type"]
         if block.type == "tool_use":
             block.id = kw.get("id"); block.name = kw.get("name"); block.input = {}
-        ev.block = block
+        ev.content_block = block
     elif kind == "content_block_delta":
         d = mock.Mock()
         d.type = kw["delta_type"]

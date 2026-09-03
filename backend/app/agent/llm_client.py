@@ -79,7 +79,7 @@ class LLMClient:
             for event in stream:
                 et = getattr(event, "type", "")
                 if et == "content_block_start":
-                    block = getattr(event, "block", None)
+                    block = getattr(event, "content_block", None) or getattr(event, "block", None)
                     if getattr(block, "type", "") == "tool_use":
                         tool_acc = {"id": block.id, "name": block.name, "input_json": ""}
                 elif et == "content_block_delta":
