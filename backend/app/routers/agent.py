@@ -1,15 +1,17 @@
 """LLM-mode chat API. Guarded by require_llm_mode. Non-streaming (Phase 2a)."""
+import json
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Dict
 
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from .. import models
 from ..auth import get_current_user
 from .mode import require_llm_mode
 from ..agent.llm_client import LLMClient
-from ..agent.agent_loop import run_agent
+from ..agent.agent_loop import run_agent, run_agent_stream
 from ..agent.tools import TOOLS, ToolExecutor
 
 router = APIRouter(tags=["agent"])
@@ -76,6 +78,38 @@ def chat(req: ChatRequest,
         return {"reply": fallback, "tool_trace": []}
     _save(db, current_user.id, "assistant", out["reply"])
     return out
+
+
+@router.post("/api/agent/chat/stream")
+def chat_stream(req: ChatRequest,
+                current_user: models.User = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    require_llm_mode(current_user)  # 403 for traditional
+
+    history = _history(db, current_user.id)
+    messages = history + [{"role": "user", "content": req.message}]
+    _save(db, current_user.id, "user", req.message)  # committed before the response returns
+
+    user_id = current_user.id
+
+    def event_source():
+        # StreamingResponse runs after the request db closes → open a fresh session
+        db2 = SessionLocal()
+        try:
+            user = db2.query(models.User).filter(models.User.id == user_id).first()
+            executor = ToolExecutor(db2, user)
+            full_reply = ""
+            for ev in run_agent_stream(llm_client, SYSTEM_PROMPT, messages, TOOLS,
+                                       executor.run, max_calls=5):
+                if ev["event"] == "text":
+                    full_reply += ev["delta"]
+                if ev["event"] == "done":
+                    _save(db2, user_id, "assistant", ev["reply"])
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
+        finally:
+            db2.close()
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 @router.get("/api/agent/session")
