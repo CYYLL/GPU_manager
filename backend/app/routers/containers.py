@@ -35,6 +35,7 @@ def start_container(
     req: schemas.ContainerStartRequest,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    source: str = "manual",
 ):
     # 1. Validate image exists
     image_record = container_crud.get_image_by_id(db, req.image_id)
@@ -134,7 +135,7 @@ def start_container(
 
             # 8. Create GpuAllocation records
             container_crud.create_allocations(db, gpu_ids, instance.id, current_user.id)
-            container_crud.record_container_event(db, instance.id, current_user.id, "create", "manual")
+            container_crud.record_container_event(db, instance.id, current_user.id, "create", source)
     except TimeoutError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -160,6 +161,7 @@ def stop_container(
     instance_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    source: str = "manual",
 ):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
@@ -195,7 +197,7 @@ def stop_container(
     # Update instance status
     container_crud.stop_container_instance(db, instance.id)
 
-    container_crud.record_container_event(db, instance.id, current_user.id, "stop", "manual")
+    container_crud.record_container_event(db, instance.id, current_user.id, "stop", source)
 
     return {"message": "Container stopped successfully"}
 
@@ -205,6 +207,7 @@ def remove_container(
     instance_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    source: str = "manual",
 ):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
@@ -231,7 +234,7 @@ def remove_container(
     # Delete DB record
     container_crud.delete_container_instance(db, instance.id)
 
-    container_crud.record_container_event(db, instance.id, current_user.id, "delete", "manual")
+    container_crud.record_container_event(db, instance.id, current_user.id, "delete", source)
 
     return {"message": "Container deleted successfully"}
 
@@ -241,6 +244,7 @@ def start_stopped_container(
     instance_id: int,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    source: str = "manual",
 ):
     instance = container_crud.get_container_instance(db, instance_id)
     if not instance:
@@ -297,7 +301,7 @@ def start_stopped_container(
             # Update status
             container_crud.start_container_instance(db, instance.id)
 
-            container_crud.record_container_event(db, instance.id, current_user.id, "start", "manual")
+            container_crud.record_container_event(db, instance.id, current_user.id, "start", source)
     except TimeoutError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
