@@ -45,10 +45,11 @@ def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
     """
     working = list(messages)
     trace: List[Dict] = []
-    for _ in range(max_calls + 1):
+    for round_idx in range(max_calls + 1):
+        round_tools = tools if round_idx < max_calls else []  # final round: force plain answer
         reply_parts: List[str] = []
         tool_calls: List[Dict] = []
-        for ev in llm_client.stream_complete(system, working, tools):
+        for ev in llm_client.stream_complete(system, working, round_tools):
             if ev["type"] == "text":
                 reply_parts.append(ev["delta"])
                 yield {"event": "text", "delta": ev["delta"]}
