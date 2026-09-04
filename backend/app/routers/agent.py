@@ -1,4 +1,4 @@
-"""LLM-mode chat API. Guarded by require_llm_mode. Non-streaming (Phase 2a)."""
+"""LLM-mode chat API: non-streaming + SSE streaming. Guarded by require_llm_mode."""
 import json
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -93,19 +93,29 @@ def chat_stream(req: ChatRequest,
     user_id = current_user.id
 
     def event_source():
-        # StreamingResponse runs after the request db closes → open a fresh session
+        # StreamingResponse runs after the request db closes → open a fresh session.
+        # The generator must never adopt the request db (it is closed by then).
         db2 = SessionLocal()
+        fallback = "模型调用失败，请稍后重试"
+        fail_event = json.dumps({"event": "done", "reply": fallback, "tool_trace": []},
+                                ensure_ascii=False)
         try:
             user = db2.query(models.User).filter(models.User.id == user_id).first()
+            if user is None:
+                _save(db2, user_id, "assistant", fallback)
+                yield f"data: {fail_event}\n\n".encode("utf-8")
+                return
             executor = ToolExecutor(db2, user)
-            full_reply = ""
-            for ev in run_agent_stream(llm_client, SYSTEM_PROMPT, messages, TOOLS,
-                                       executor.run, max_calls=5):
-                if ev["event"] == "text":
-                    full_reply += ev["delta"]
-                if ev["event"] == "done":
-                    _save(db2, user_id, "assistant", ev["reply"])
-                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
+            try:
+                for ev in run_agent_stream(llm_client, SYSTEM_PROMPT, messages, TOOLS,
+                                           executor.run, max_calls=5):
+                    if ev["event"] == "done":
+                        _save(db2, user_id, "assistant", ev["reply"])
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
+            except Exception:
+                # keep role alternation: never leave history ending on a user turn
+                _save(db2, user_id, "assistant", fallback)
+                yield f"data: {fail_event}\n\n".encode("utf-8")
         finally:
             db2.close()
 

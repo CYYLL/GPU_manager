@@ -84,3 +84,36 @@ def test_stream_route_emits_events_and_persists(monkeypatch, engine):
     assert msgs[-1].content == "4 张卡空闲"
     db2.close()
     db.close()
+
+
+def test_stream_route_fallback_on_llm_failure(monkeypatch, engine):
+    from sqlalchemy.orm import sessionmaker
+    TestSess = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(agent_router, "SessionLocal", TestSess)
+
+    db = TestSess()
+    u = _mk_user(db)
+
+    llm = mock.Mock()
+    llm.stream_complete.side_effect = Exception("LLM API down")
+    monkeypatch.setattr(agent_router, "llm_client", llm)
+
+    resp = agent_router.chat_stream(agent_router.ChatRequest(message="hi"), u, db)
+    import asyncio
+
+    async def _collect(resp):
+        return b"".join([chunk async for chunk in resp.body_iterator])
+
+    raw = asyncio.run(_collect(resp))
+    lines = [ln for ln in raw.decode().splitlines() if ln.startswith("data: ")]
+    events = [json.loads(ln[6:]) for ln in lines]
+
+    assert events[-1]["event"] == "done"
+    assert "失败" in events[-1]["reply"]
+    # role alternation preserved: assistant fallback persisted after the user turn
+    db2 = TestSess()
+    msgs = db2.query(models.ChatMessage).filter(models.ChatMessage.user_id == u.id).all()
+    assert [m.role for m in msgs] == ["user", "assistant"]
+    assert "失败" in msgs[-1].content
+    db2.close()
+    db.close()

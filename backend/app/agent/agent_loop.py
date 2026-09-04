@@ -56,7 +56,8 @@ def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
             elif ev["type"] == "tool_use":
                 tool_calls.append(ev)
         if not tool_calls:
-            yield {"event": "done", "reply": "".join(reply_parts), "tool_trace": trace}
+            reply = "".join(reply_parts) or "已达到单次对话工具调用上限"
+            yield {"event": "done", "reply": reply, "tool_trace": trace}
             return
         for call in tool_calls:
             yield {"event": "tool_use", "tool": call["name"], "input": call.get("input", {})}
