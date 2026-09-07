@@ -249,3 +249,29 @@ def get_last_used(db: Session, instance_id: int):
         models.ContainerEvent.container_instance_id == instance_id
     ).order_by(models.ContainerEvent.created_at.desc()).first()
     return ev.created_at if ev else None
+
+
+def mark_container_removed(db: Session, instance_id: int, docker_runner,
+                           source: str = "agent") -> bool:
+    """Force-remove the docker container and mark the DB record `removed`
+    (kept as the config snapshot for one-click rebuild). Releases allocations.
+
+    Returns False — leaving DB state untouched, allocations intact — when the
+    docker removal itself failed. A container that is still alive in docker must
+    never be untracked nor have its GPUs released, or cleanup would claim a
+    success it didn't achieve and risk double allocation.
+    """
+    inst = get_container_instance(db, instance_id)
+    if inst is None:
+        return False
+    ok, _msg = docker_runner.remove_container(inst.container_id)
+    if not ok:
+        return False
+    release_allocations_by_container(db, inst.id)
+    inst.status = "removed"
+    inst.stopped_at = datetime.utcnow()
+    db.commit()
+    db.refresh(inst)
+    record_container_event(db, inst.id, inst.user_id, "delete", source,
+                           detail="cleanup mark removed")
+    return True

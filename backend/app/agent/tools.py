@@ -52,6 +52,9 @@ TOOLS: List[Dict] = [
     {"name": "delete_container", "description": "删除一个容器（不可恢复，会 force 移除；保留工作区数据但无配置快照；操作前确认）",
      "input_schema": {"type": "object", "properties": {
          "id": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "rebuild_container", "description": "重建一个已删除(removed)的容器（用原配置快照）",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
 ]
 
 _SRC = "llm"
@@ -152,6 +155,13 @@ class ToolExecutor:
         try:
             result = containers_router._remove_container_impl(int(inp["id"]), self.user, self.db, "llm")
             return True, result.get("message", "deleted")
+        except HTTPException as e:
+            return False, e.detail
+
+    def _tool_rebuild_container(self, inp) -> Tuple[bool, str]:
+        try:
+            resp = containers_router._rebuild_container_impl(int(inp["id"]), self.user, self.db, "llm")
+            return True, (f"容器已重建 id={resp.id} status={resp.status} port={resp.assigned_port}")
         except HTTPException as e:
             return False, e.detail
 

@@ -5,6 +5,7 @@ import uuid
 import secrets
 import string
 import os
+from datetime import datetime
 from docker.types import Mount
 
 from ..database import get_db
@@ -319,6 +320,98 @@ def _start_stopped_container_impl(instance_id: int, current_user: models.User, d
         raise HTTPException(status_code=503, detail=str(e))
 
     return {"message": "Container started successfully"}
+
+
+@router.post("/api/containers/{instance_id}/rebuild", response_model=schemas.ContainerResponse)
+def rebuild_container(instance_id: int,
+                      current_user: models.User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    return _rebuild_container_impl(instance_id, current_user, db, "manual")
+
+
+def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Session,
+                            source: str = "manual"):
+    """Recreate a `removed` container from its stored config snapshot."""
+    instance = container_crud.get_container_instance(db, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Container instance not found")
+    if current_user.role != "admin" and instance.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to rebuild this container")
+    if instance.status != "removed":
+        raise HTTPException(status_code=400, detail="Container is not in removed state")
+
+    allocator = GPUAllocator(total_gpu_count=gpu_monitor.get_gpu_count())
+    try:
+        with allocator.allocate_guard(timeout=int(os.environ.get("ALLOCATION_TIMEOUT", "60"))):
+            allocated_ids = container_crud.get_allocated_gpu_ids(db)
+            raw_statuses = gpu_monitor.get_gpu_status()
+            busy_ids = set(
+                g["id"] for g in raw_statuses
+                if g["id"] not in allocated_ids and (
+                    g.get("memory_utilization", 0) > 5 or g.get("gpu_utilization", 0) > 10
+                )
+            )
+            for gid in instance.gpu_ids:
+                if gid in allocated_ids or gid in busy_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"GPU {gid} is no longer available. Register a new container instead.",
+                    )
+
+            # port: reuse if still free (not held by another container), else reallocate
+            used_ports = set()
+            for (p,) in db.query(models.ContainerInstance.assigned_port).filter(
+                models.ContainerInstance.assigned_port.isnot(None),
+                models.ContainerInstance.id != instance.id,
+            ).all():
+                used_ports.add(p)
+            assigned_port = instance.assigned_port
+            if assigned_port is None or assigned_port in used_ports:
+                assigned_port = container_crud.allocate_port(db)
+                instance.assigned_port = assigned_port
+
+            container_name = f"gpu-{current_user.username}-{str(uuid.uuid4())[:8]}"
+            port_mapping = {"22/tcp": str(assigned_port)}
+            mount_dir = os.path.join(os.environ.get("CONTAINER_MOUNT_ROOT", "/amax"),
+                                     f"gpu-{current_user.username}")
+            os.makedirs(mount_dir, exist_ok=True)
+            volume_mount = Mount(target="/workspace", source=mount_dir, type="bind")
+
+            try:
+                docker_id, _docker_status = docker_runner.start_container(
+                    image=instance.image,
+                    name=container_name,
+                    gpu_ids=instance.gpu_ids,
+                    cpu_limit=instance.cpu_limit,
+                    memory_limit=instance.memory_limit,
+                    env_vars=instance.env_vars or {},
+                    ports=port_mapping,
+                    volumes=[volume_mount],
+                    ssh_password=instance.access_password,
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+            instance.container_id = docker_id
+            instance.status = "running"
+            instance.started_at = datetime.utcnow()
+            instance.stopped_at = None
+            db.commit()
+            db.refresh(instance)
+            container_crud.create_allocations(db, instance.gpu_ids, instance.id, current_user.id)
+            container_crud.record_container_event(db, instance.id, current_user.id,
+                                                  "rebuild", source)
+    except TimeoutError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    return schemas.ContainerResponse(
+        id=instance.id, container_id=instance.container_id[:12], image=instance.image,
+        status=instance.status, user_id=instance.user_id, gpu_ids=instance.gpu_ids,
+        gpu_count=instance.gpu_count, cpu_limit=instance.cpu_limit,
+        memory_limit=instance.memory_limit, assigned_port=instance.assigned_port,
+        access_password=instance.access_password, created_at=instance.created_at,
+        started_at=instance.started_at,
+    )
 
 
 @router.get("/api/containers", response_model=List[schemas.ContainerResponse])
