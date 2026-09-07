@@ -1,16 +1,18 @@
-# GPU Resource Manager — 部署与配置文档
+# GPU Resource Manager v2 — 部署与配置文档
 
-> 版本 2.0 | 2026-06-01
+> 版本 2.0 | 2026-09-07
+>
+> 代码库：`/amax/gpu_manager_v2`（v1 的演进分支，与运行中的 v1 `/amax/gpu_manager` **并存独立**，各用各的 SQLite 数据库）
 
 ---
 
 ## 目录 / Table of Contents
 
 1. [项目概述 / Overview](#1-项目概述--overview)
-2. [导航指南 / Navigation Guide](#2-navigation-guide--导航指南)
+2. [v2 变更速查 / What's new in v2](#2-v2-变更速查--whats-new-in-v2)
 3. [环境配置 / Environment Config (.env)](#3-环境配置--environment-config-env)
 4. [项目结构 / Project Structure](#4-项目结构--project-structure)
-5. [部署步骤 / Deployment](#5-部署步骤--deployment)
+5. [部署 / Deployment](#5-部署--deployment)
 6. [API 接口 / API Endpoints](#6-api-接口--api-endpoints)
 7. [常见问题 / FAQ](#7-常见问题--faq)
 
@@ -18,385 +20,457 @@
 
 ## 1. 项目概述 / Overview
 
-GPU Manager 是一个基于 Web 的 GPU 资源管理平台，支持多用户 GPU 容器调度、配额管理和实时监控。
+GPU Manager 是一个基于 Web 的 GPU 资源管理平台，支持多用户 GPU 容器调度、配额管理和实时监控。v2 在 v1 基础上新增三条主线能力：
 
-Key features:
+- **双模式（Dual-mode）**：每个 `User` 有一个 `mode`（`llm` / `traditional`，见 `MODE_DEFAULT`）。`llm` 用户可在前端 Agent 页用自然语言指挥 agent 完成 GPU/容器操作；`traditional` 走传统手动页面。`mode` 由服务端 `User.mode` 权威存储，`GET/PUT /api/mode` 读写。
+- **自主监控（Monitor）**：后端定时线程周期性采样 GPU/容器/磁盘状态、写 `ContainerEvent` / `DiskSnapshot` 表、按保留期清理旧事件与聊天记录。
+- **自动清理引擎（Cleanup）**：磁盘水位触发时，按 LRU 清理「仅删容器、保留工作区」的最久未用容器：容器置 `removed` 态并保留配置快照，可一键 rebuild；支持清理保护标记、dry-run 预演、容量/扩容 admin 告警。
+
+Key features (v1 base + v2):
 
 - Real-time GPU monitoring via NVML
 - Multi-tenant GPU allocation with quota enforcement
-- Docker container lifecycle management with GPU pass-through
-- Role-based access control (user / admin)
-- Preset GPU Docker image management
-- SSH access into containers
+- Docker container lifecycle with GPU pass-through, stop-retry
+- LLM agent (chat + streaming SSE + 12 mutating tools) for container ops
+- Automatic disk cleanup (LRU, protection, rebuild, dry-run)
+- Role-based access control (user / admin); llm-mode gating on agent & admin surfaces
+- Preset GPU Docker image management; SSH access into containers
 
 ### 1.1 推荐镜像 / Recommended Images
-- Ubuntu 20.04 / 22.04 / 24.04
-- Debian 11 / 12
-- CUDA 官方镜像（Ubuntu 版本）
-- PyTorch 官方镜像
-- TensorFlow 官方镜像
-- 基于 Ubuntu/Debian 构建的 AI 训练镜像
+Ubuntu 20.04 / 22.04 / 24.04 · Debian 11 / 12 · CUDA 官方镜像 · PyTorch 官方镜像 · TensorFlow 官方镜像 · 基于 Ubuntu/Debian 构建的 AI 训练镜像
+
+### 1.2 数据库 / Database
+
+- 表由 `Base.metadata.create_all` 在启动时**自动创建**（无迁移工具，属设计决策）。
+- 默认 SQLite：`DATABASE_URL` 未设置时回退 `sqlite:///./gpu_resource_manager.db`，**相对路径按 systemd `WorkingDirectory`（= `backend/`）解析** → 数据库文件位于 `backend/gpu_resource_manager.db`。
+- ⚠ v2 用的是**自己全新的空库**，不携带 v1 的用户/容器/配额数据（schema 比 v1 多出 `User.mode`、`ContainerInstance.cleanup_protected` 等列，直接拷贝 v1 库文件**不受支持**，见 §7.4）。
+- v2 数据表：`users, gpu_images, container_instances, gpu_allocations, container_events, disk_snapshots, cleanup_logs, chat_messages, admin_alerts`。
 
 ---
 
-## 2. Navigation Guide / 导航指南
-
-本会话中新增或修改的行为，快速索引：
+## 2. v2 变更速查 / What's new in v2
 
 | 变更 | 说明 | 相关章节 |
 |------|------|----------|
-| **同用户单容器限制** | 同一用户一次只能启动一个容器（必须停止当前容器才能启动新的） | API 容器 |
-| **新用户默认 GPU 配额为 0** | 注册后默认无 GPU 权限，需管理员手动分配配额 | FAQ 6.3 |
-| **GPU 异常状态显示** | 坏卡不再阻断整个状态查询，显示紫色 `ERROR` 徽章，其他卡不受影响 | FAQ 6.2 |
-| **容器挂载根目录可配置** | 宿主机 `gpu-{username}/` 的父目录，通过 `.env` 的 `CONTAINER_MOUNT_ROOT` 设置 | § 2.3 |
-| **路径相对化** | Python 代码中所有路径基于 `__file__` 推导，迁移只需改部署配置 | § 4.2 |
-| **中英双语文档** | 本文件，覆盖配置/部署/API/FAQ | 全部 |
-| **容器停止自动重试** | 停止/删除失败后自动重试 3 次，全部失败才报错，可环境变量调整 | § 2.8 |
+| **LLM agent** | `/chat` 页自然语言操作容器/GPU/镜像/存储；SSE 流式回复 + 工具调用轨迹 | §6 Agent |
+| **双模式 mode** | `User.mode` = `llm`/`traditional`，后端权威 + 前端 ModeContext 缓存 | §3、§6 Mode |
+| **清理引擎** | 磁盘超阈值时 LRU 清理；**仅删容器保留工作区** | §3 Cleanup、§6 Monitor/Admin |
+| **removed 一键 rebuild** | 被清理容器状态=removed，可 POST `/rebuild` 按快照重建 | §6 容器 |
+| **清理保护** | `cleanup_protected` 容器永不进入清理候选 | §6 容器 |
+| **监控/告警** | `monitor` 线程采样 + `ContainerEvent`/`DiskSnapshot`；容量/扩容 `AdminAlert` | §3、§6 |
+| **llm-mode 门控** | `traditional` 模式调 agent/监控/候选接口 → 403（后端 `require_llm_mode`） | §6 |
+| **SSE 反代缓冲关闭** | nginx 对 `/api/` 关 `proxy_buffering`，流式即时送达 | §5.1、§5.2 |
 
 ---
 
 ## 3. 环境配置 / Environment Config (.env)
 
-配置文件位于项目根目录 `./.env`，后端启动时自动加载。
-The `.env` file at the project root is loaded automatically on startup.
+配置文件位于**项目根目录** `./.env`（`/amax/gpu_manager_v2/.env`）。后端 `app/main.py` 在导入任何 router **之前**用 `load_dotenv(PROJECT_ROOT/.env)` 加载（模块级构造 `LLMClient`/`DockerRunner` 在 import 时读 env）。
 
-### 2.1 SECRET_KEY — JWT 签名密钥
+> ⚠ systemd 单元里 `Environment=` 的值会**覆盖** `.env`（dotenv 默认不覆盖已有进程环境变量）——因此 v2 的单元文件**不写密钥**，所有配置以 `.env` 为准。改 `.env` 后重启后端生效。
 
-**用途 / Purpose**: 签名用户登录令牌，防止令牌伪造。
+### 3.1 完整参考 / Full reference（按类别）
 
-**获取方式 / How to generate**:
+**① 安全 / Security**
 
-```bash
-# 方法一：openssl
-openssl rand -hex 32
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `SECRET_KEY` | `your-secret-key-change-in-production` | JWT 签名密钥。**生产必须改**：`openssl rand -hex 32`。泄露即可伪造任意管理员 token |
+| `ALGORITHM` | `HS256` | JWT 签名算法 |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | 登录 token 有效期（分钟） |
+| `CORS_ORIGINS` | `*` | 允许跨域来源，逗号分隔；生产设具体域名 |
 
-# 方法二：Python
-python3 -c "import secrets; print(secrets.token_hex(32))"
-```
+**② 数据库 / Database**
 
-**⚠️ 生产环境必须修改！** 使用默认值会导致任意用户可以伪造管理员 token 直接登录。
-**Must change in production!** The default value lets anyone forge admin tokens.
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `DATABASE_URL` | `sqlite:///./gpu_resource_manager.db` | 连接串。SQLite 相对路径按 cwd（backend/）解析；PostgreSQL 示例见下 |
 
-**示例 / Example**:
-```
-SECRET_KEY=080e49fb15d792bda9c089aa8f18e634faef8645bd691d983de757e15fa01648
-```
-
-### 2.2 CORS_ORIGINS — 跨域来源
-
-**用途 / Purpose**: 允许访问后端的域名列表，逗号分隔。浏览器会拦截不在列表中的跨域请求。
-
-**默认 / Default**:
-```
-CORS_ORIGINS=http://localhost:3000,http://localhost,http://127.0.0.1
-```
-
-如果需要通过其他域名访问，将域名加入列表。生产环境建议设为具体域名而非 `*`。
-Add your production domain here if accessing from a different origin.
-
-### 2.3 CONTAINER_MOUNT_ROOT — 容器挂载根目录
-
-**用途 / Purpose**: 容器在宿主机上的工作目录的父路径。启动容器时会在该目录下创建 `gpu-{username}/` 子目录，挂载到容器的 `/workspace`。
-
-**默认 / Default**:
-```
-CONTAINER_MOUNT_ROOT=/amax
-```
-
-以用户 `XM` 为例，效果为：
-```
-宿主机: /amax/gpu-XM/  →  容器内: /workspace/
-```
-
-**注意 / Note**: Docker bind mount 必须使用绝对路径，此处不支持相对路径。
-
-### 2.4 ALLOCATION_TIMEOUT — GPU 分配锁超时
-
-**用途 / Purpose**: GPU 分配请求等待锁的超时时间（秒）。多个用户同时申请 GPU 时串行排队，超时后返回 503。
-
-**默认 / Default**:
-```
-ALLOCATION_TIMEOUT=60
-```
-
-### 2.5 PORT_RANGE — 容器 SSH 端口范围
-
-**用途 / Purpose**: 容器 SSH 服务映射到宿主机的端口范围。端口用完后新容器无法启动。
-
-**默认 / Default**:
-```
-PORT_RANGE_START=22000
-PORT_RANGE_END=22999
-```
-
-### 2.6 STALE_MEMORY_THRESHOLD — GPU 悬空判断阈值
-
-**用途 / Purpose**: 显存利用率低于此百分比时 GPU 被认为处于空闲状态，用于检测"分配了但容器已停止"的悬空 GPU。
-
-**默认 / Default**:
-```
-STALE_MEMORY_THRESHOLD=5
-```
-
-### 2.7 DATABASE_URL — 数据库连接
-
-**用途 / Purpose**: 数据库连接字符串。默认使用 SQLite，支持切换为 PostgreSQL。
-
-**默认 / Default** (SQLite):
-```
-DATABASE_URL=sqlite:///./gpu_resource_manager.db
-```
-
-**PostgreSQL 示例 / Example**:
 ```
 DATABASE_URL=postgresql://user:password@host:5432/gpu_manager
 ```
 
-### 2.8 DOCKER_STOP_* — 容器停止重试
-
-**用途 / Purpose**: 停止/删除容器时，`docker stop` 失败后自动重试的参数。偶发失败（进程响应慢、daemon 抖动）时重试可提高成功率，避免直接报 500。
+**③ 容器挂载 / 资源分配**
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `DOCKER_STOP_ATTEMPTS` | `3` | 停止总尝试次数（含首次） |
-| `DOCKER_STOP_TIMEOUT` | `10` | 每次尝试的 stop 超时（秒） |
-| `DOCKER_STOP_RETRY_DELAY` | `2` | 重试间隔基数（秒），第 n 次间隔 = `2 × n` |
+| `CONTAINER_MOUNT_ROOT` | `/amax` | 容器工作目录父路径；`gpu-{username}/` 挂到容器 `/workspace`，**必须绝对路径** |
+| `ALLOCATION_TIMEOUT` | `60` | GPU 分配锁超时（秒），并发申请串行排队 |
+| `PORT_RANGE_START` / `PORT_RANGE_END` | `22000` / `22999` | 容器 SSH 映射宿主端口范围 |
+| `STALE_MEMORY_THRESHOLD` | `5` | 显存利用率低于此百分比视为空闲（检测悬空 GPU） |
 
-**默认 / Default**:
-```
+**④ Docker 停止重试**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `DOCKER_STOP_ATTEMPTS` | `3` | stop/remove 总尝试次数（含首次） |
+| `DOCKER_STOP_TIMEOUT` | `10` | 单次 stop 超时（秒） |
+| `DOCKER_STOP_RETRY_DELAY` | `2` | 重试间隔基数（秒），第 n 次间隔 = 基数 × n |
+
+**⑤ 双模式 / Agent（v2）**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `MODE_DEFAULT` | `llm` | 新注册用户的默认模式：`llm` 或 `traditional`（可被前端模式切换覆盖，写入该用户 `User.mode`） |
+| `LLM_API_KEY` | （空） | Agent 的 LLM API Key。优先级高于 `ANTHROPIC_AUTH_TOKEN` |
+| `LLM_BASE_URL` | （空） | 自定义网关/代理地址（OpenAI 兼容转发等）。优先级高于 `ANTHROPIC_BASE_URL` |
+| `LLM_MODEL` | `claude-sonnet-4-6`* | 模型名（配置后优先生效） |
+| `ANTHROPIC_BASE_URL` | （空） | Anthropic API 地址（默认官方） |
+| `ANTHROPIC_AUTH_TOKEN` | （空） | Anthropic API Key |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | （空） | 未设 `LLM_MODEL` 时的兜底模型名 |
+| `LLM_STREAMING` | `auto` | `auto`/`true` 走原生流式；`false` 关流式（走一次性 complete） |
+
+\* 代码内置兜底；三者均未设置时使用内置默认名。
+
+**⑥ 监控与保留（v2）**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `MONITOR_INTERVAL` | `3600` | 监控/清理线程采样间隔（秒）。生产按需调小（如 `300`）以更快发现外部停止/水位 |
+| `EVENT_RETENTION_DAYS` | `30` | `ContainerEvent` 保留天数 |
+| `SNAPSHOT_RETENTION_DAYS` | `7` | `DiskSnapshot` 保留天数 |
+| `CHAT_HISTORY_LIMIT` | `200` | 每用户保留的最近 chat 消息条数 |
+
+**⑦ 清理引擎（v2）**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CLEANUP_ENABLED` | `true` | 总开关（`0`/`false`/`no` 关） |
+| `CLEANUP_DRY_RUN` | `false` | 预演模式：只记录决策、不实际删容器不回收空间（见 §7.5 消耗说明） |
+| `DISK_THRESHOLD` | `85` | 磁盘水位（%）触发清理 |
+| `DISK_CRITICAL` | `95` | 临界水位（%）；达到时更激进 |
+| `DISK_TARGET` | `80` | 常规清理目标水位（%） |
+| `DISK_CRITICAL_TARGET` | `90` | 临界时目标水位（%） |
+| `CLEANUP_COOLDOWN_MINUTES` | `5` | 两轮清理最小间隔 |
+| `CLEANUP_MAX_PER_DAY` | `10` | 每 24h（UTC 0 点起）最多删容器数 |
+| `CLEANUP_MAX_PER_ROUND` | `3` | 每轮最多删容器数 |
+| `CONTAINER_RECLAIM_TRIGGER_GB` | `20` | 容器（SizeRw/运行 SizeRootFs）+ 可回收镜像 ≥ 此 GB 才触发 docker 侧清理 |
+| `BUILD_CACHE_TRIGGER_GB` | `100` | BuildKit 缓存 ≥ 此 GB 时独立执行 builder prune |
+| `MIN_EFFECTIVE_FREE_GB` | `5` | 最小有效净释放；低于则升级容量告警 |
+| `WORKSPACE_DOMINANT_PCT` | `60` | `/amax` 下 gpu-* 工作区占全盘比例超过此值 → 建议扩容告警（删除无效） |
+| `GRACE_DAYS` | `2` | 未使用宽限期：停止的容器空闲超过此天数才入候选 |
+| `CLEANUP_LOCK_FILE` | `/tmp/gpu_manager_v2_cleanup.lock` | 跨进程清理互斥锁文件（`fcntl.flock`），避免多实例并发清理 |
+
+### 3.2 可直接复制的 .env / Copy-paste template
+
+在 v2 项目根目录放 `.env`（**不是** backend/ 下）。`DATABASE_URL` 保持注释即用默认 SQLite。
+
+```bash
+# ── Security ──
+SECRET_KEY=openssl rand -hex 32 产生的值
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+
+# ── CORS ──
+CORS_ORIGINS=http://localhost:3000,http://localhost,http://127.0.0.1
+
+# ── Container mount root / GPU allocation / ports ──
+CONTAINER_MOUNT_ROOT=/amax
+ALLOCATION_TIMEOUT=60
+PORT_RANGE_START=22000
+PORT_RANGE_END=22999
+STALE_MEMORY_THRESHOLD=5
+
+# ── Docker stop retry ──
 DOCKER_STOP_ATTEMPTS=3
 DOCKER_STOP_TIMEOUT=10
 DOCKER_STOP_RETRY_DELAY=2
+
+# ── Database (default: SQLite under backend/) ──
+# DATABASE_URL=sqlite:///./gpu_resource_manager.db
+
+# ── Dual-mode ──
+MODE_DEFAULT=llm            # llm | traditional
+
+# ── LLM / Agent ──
+LLM_API_KEY=sk-...
+# LLM_BASE_URL=https://api.anthropic.com
+# LLM_MODEL=claude-sonnet-4-6
+# LLM_STREAMING=auto
+# ANTHROPIC_BASE_URL=
+# ANTHROPIC_AUTH_TOKEN=
+# ANTHROPIC_DEFAULT_SONNET_MODEL=
+
+# ── Monitor & retention ──
+MONITOR_INTERVAL=300
+EVENT_RETENTION_DAYS=30
+SNAPSHOT_RETENTION_DAYS=7
+CHAT_HISTORY_LIMIT=200
+
+# ── Cleanup engine ──
+CLEANUP_ENABLED=true
+CLEANUP_DRY_RUN=false
+DISK_THRESHOLD=85
+DISK_CRITICAL=95
+DISK_TARGET=80
+DISK_CRITICAL_TARGET=90
+CLEANUP_COOLDOWN_MINUTES=5
+CLEANUP_MAX_PER_DAY=10
+CLEANUP_MAX_PER_ROUND=3
+CONTAINER_RECLAIM_TRIGGER_GB=20
+BUILD_CACHE_TRIGGER_GB=100
+MIN_EFFECTIVE_FREE_GB=5
+WORKSPACE_DOMINANT_PCT=60
+GRACE_DAYS=2
+# CLEANUP_LOCK_FILE=/tmp/gpu_manager_v2_cleanup.lock
 ```
 
 ---
 
-## 3. 项目结构 / Project Structure
+## 4. 项目结构 / Project Structure
 
 ```
-{PROJECT_ROOT}/
-├── .env                          # 环境配置（本文件）
-├── backend/                      # Python FastAPI 后端
+/amax/gpu_manager_v2/
+├── .env                          # 环境配置（项目根目录，main.py 从这里 load_dotenv）
+├── backend/
 │   ├── app/
-│   │   ├── main.py               # 应用入口，CORS，启动事件，.env 加载
-│   │   ├── database.py           # SQLAlchemy 引擎 + get_db 依赖
-│   │   ├── models.py             # ORM 模型（User, ContainerInstance, GpuAllocation, ...）
-│   │   ├── schemas.py            # Pydantic 请求/响应模型
-│   │   ├── auth.py               # JWT 认证 + get_current_user / get_current_admin 依赖
+│   │   ├── main.py               # 入口：先 load_dotenv(PROJECT_ROOT/.env) 再 import routers
+│   │   ├── database.py           # engine + get_db（DATABASE_URL 默认 sqlite:///./…，按 cwd 解析）
+│   │   ├── models.py             # 9 张表（User/GpuImage/ContainerInstance/GpuAllocation/
+│   │   │                         #   ContainerEvent/DiskSnapshot/CleanupLog/ChatMessage/AdminAlert）
+│   │   ├── schemas.py            # Pydantic 模型（UserOut.mode、ContainerResponse.cleanup_protected …）
+│   │   ├── auth.py               # JWT + get_current_user / get_current_admin
 │   │   ├── routers/
-│   │   │   ├── users.py          # 用户注册/登录/密码管理 + admin 用户管理
-│   │   │   ├── gpus.py           # GPU 状态查询 + admin 分配记录
-│   │   │   └── containers.py     # 容器生命周期 + 镜像管理 + 系统配置
+│   │   │   ├── users.py          # 注册/登录/me/密码 + admin 用户/配额
+│   │   │   ├── gpus.py           # GPU 状态 + admin 分配记录
+│   │   │   ├── containers.py     # 容器生命周期 + rebuild + protection + 镜像
+│   │   │   ├── mode.py           # GET/PUT /api/mode + require_llm_mode 依赖（llm 门控）
+│   │   │   ├── agent.py          # chat / chat/stream(SSE) / session
+│   │   │   └── monitor.py        # monitor 容器/磁盘/候选 + admin 清理日志/告警
 │   │   ├── services/
-│   │   │   ├── gpu_monitor.py    # NVML GPU 只读状态查询（单例）
-│   │   │   ├── gpu_allocator.py  # GPU 分配/释放/配额检查（线程锁）
-│   │   │   └── docker_runner.py  # Docker 容器操作 + SSH 配置
+│   │   │   ├── gpu_monitor.py    # NVML 只读状态
+│   │   │   ├── gpu_allocator.py  # GPU 分配/配额（线程锁）
+│   │   │   └── docker_runner.py  # Docker 操作（df/prune/build-prune 透传 + stop 重试）
+│   │   ├── agent/                # v2：agent 子系统
+│   │   │   ├── llm_client.py     # LLMClient（LLM_* 覆盖 ANTHROPIC_*；complete/stream）
+│   │   │   ├── system_prompt.py  # 系统提示 + 变更能力护栏
+│   │   │   ├── tools.py          # 11 个工具（查询：容器/GPU/磁盘/镜像；变更：create/start/stop/
+│   │   │   │                     #   remove/rebuild/set_protection）
+│   │   │   ├── executor.py       # 工具执行器
+│   │   │   ├── monitor.py        # 采样线程：snapshot/retention + 每轮调 cleanup
+│   │   │   └── cleanup.py        # 清理引擎：决策 + 控制循环（锁/限额/冷却/告警）
 │   │   └── crud/
-│   │       ├── users.py          # 用户 CRUD + 密码哈希
-│   │       └── containers.py     # 容器/配额/分配/镜像 CRUD
+│   │       ├── users.py
+│   │       └── containers.py     # 容器/分配/镜像/事件/清理日志 CRUD + mark_container_removed
 │   ├── requirements.txt
-│   └── gpu_resource_manager.db   # SQLite 数据库文件
-├── frontend/                     # React SPA 前端
+│   ├── gpu_resource_manager.db   # v2 自己的 SQLite（自动建表）
+│   └── tests/                    # pytest（Phase 回归基线 93 passed）
+├── frontend/                     # React 18 SPA
 │   ├── src/
-│   │   ├── App.js                # 路由配置
-│   │   ├── pages/
-│   │   │   ├── Login.js          # 登录/注册
-│   │   │   ├── Home.js           # 首页 + GPU 状态图例
-│   │   │   ├── Dashboard.js      # GPU 状态看板（实时刷新 5s）
-│   │   │   ├── ContainerManagement.js  # 容器管理（启动/停止/删除）
-│   │   │   ├── UserProfile.js    # 用户信息 + 密码修改 + admin 重置密码
-│   │   │   ├── AdminUsers.js     # 用户列表 + 配额管理
-│   │   │   └── AdminImages.js    # 镜像管理 + 挂载根目录显示
-│   │   └── services/
-│   │       └── api.js            # Axios 实例 + JWT 拦截器
-│   └── build/                    # 构建产物（由 npm run build 生成）
-├── deploy/
-│   ├── gpu-manager-backend.service   # systemd 后端服务
-│   ├── gpu-manager-frontend.service  # systemd 前端服务
-│   ├── gpu-manager.nginx.conf        # Nginx 反向代理配置
-│   └── install-services.sh           # 一键安装脚本
-└── docs/
-    └── deployment.md              # 本文档
+│   │   ├── context/ModeContext.js# mode 服务端同步 + localStorage 缓存
+│   │   ├── components/ModeToggle.js  # LLM/传统 切换
+│   │   ├── pages/AgentChat.js    # agent 聊天（SSE 流式 + 工具轨迹）
+│   │   ├── pages/AdminCleanupLog.js   # /admin/cleanup 监控+清理日志+告警
+│   │   ├── services/agentStream.js    # fetch POST SSE 解析器
+│   │   └── …                    # 其余同 v1（Home/Dashboard/ContainerManagement/…）
+│   └── build/                    # npm run build 产物（nginx 直读）
+├── deploy/                       # v2 部署产物（见 §5）
+│   ├── gpu-manager-backend.service
+│   ├── gpu-manager-frontend.service
+│   ├── gpu-manager.nginx.conf
+│   ├── install-services.sh
+│   └── gpu-manager-v2-cutover.sh # v1→v2 停机窗口切换（幂等 + 备份）
+└── docs/deployment.md            # 本文档
 ```
 
 ---
 
-## 4. 部署步骤 / Deployment
+## 5. 部署 / Deployment
 
-### 4.1 首次部署 / First-time setup
+### 5.0 线上现状（本机）
 
-以下命令默认在项目根目录下执行（如 `/amax/gpu_manager/`）。
-All commands below assume you are in the project root directory.
+`/amax/gpu_manager`（v1）的 `gpu-manager-backend.service` **正在 :8000 运行**，nginx 服务其前端。v2 与其完全独立：不同代码目录、不同 `.env`、不同 SQLite、**未占用的进程**。下列步骤在生产切换前均不会触碰 v1。
+
+### 5.1 全新部署 v2 / First-time on a fresh host
+
+以下命令在 `/amax/gpu_manager_v2/` 下执行。
 
 ```bash
-# 1. 安装 Python 依赖
-cd ./backend
+# 1. 后端依赖（本机已装；新机用项目 Python 环境）
+cd backend
 pip install -r requirements.txt
 
-# 2. 安装前端依赖并构建（Node.js 16+）
-cd ./frontend
+# 2. 前端依赖 + 构建（Node 18 via nvm；本机默认 Node 10 过旧）
+cd ../frontend
+source ~/.nvm/nvm.sh && nvm use 18
 npm install
-npm run build
+CI=1 npm run build          # 产物 → frontend/build/
 
-# 3. 配置 .env（参考第 2 章）
-# 至少修改 SECRET_KEY
+# 3. .env（项目根目录）——至少改 SECRET_KEY，LLM 场景填 LLM_API_KEY 等（§3.2）
+cd ..
+#   （编辑 .env）
 
-# 4. 配置 Nginx
-sudo cp ./deploy/gpu-manager.nginx.conf /etc/nginx/sites-available/
-sudo ln -s /etc/nginx/sites-available/gpu-manager.nginx.conf /etc/nginx/sites-enabled/
-# ⚠ 检查 nginx root 路径是否与项目实际位置一致
-sudo nginx -t && sudo systemctl reload nginx
+# 4. 冒烟启动（占 8001，不冲突线上 8000）
+cd backend
+/opt/anaconda3/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8001
+#   另开终端：curl http://127.0.0.1:8001/docs   → 200；Ctrl+C 停掉
 
-# 5. 配置 systemd 服务
-sudo cp ./deploy/gpu-manager-backend.service /etc/systemd/system/
-# ⚠ 检查 WorkingDirectory 和 ExecStart 路径
-sudo systemctl daemon-reload
-sudo systemctl enable --now gpu-manager-backend
+# 5. 用 deploy 安装 systemd + nginx
+sudo bash deploy/install-services.sh
 ```
 
-### 4.2 迁移到新目录 / Migrating to a new path
+`install-services.sh` 语义（本仓库 deploy 内）：
+- **检测到 v1 在跑（:8000 被非 v2 占用）→ 拒绝并退出**，提示走 cutover 脚本；不会静默覆盖线上配置造成「半切换」状态。
+- 无冲突（新机 / 已切换为 v2）→ 安装并 enable+start `gpu-manager-backend`（:8000）与 `gpu-manager-frontend`（:3001，可选，nginx 直读 build），拷贝 nginx 站点、`nginx -t && reload`。
+- nginx 配置含对 `/api/` 的 `proxy_buffering off`（否则 agent 流式 SSE 会整段缓冲）。
 
-由于 Python 代码中的所有路径都基于 `__file__` 动态推导，迁移时**无需修改代码**。只需调整：
+### 5.2 v1 → v2 切换（停机窗口）/ v1 → v2 cutover
 
-| 需要手动修改 | 原因 |
-|-------------|------|
-| `deploy/gpu-manager-backend.service` 的 `WorkingDirectory` 和 `ExecStart` | systemd 配置 |
-| `deploy/gpu-manager.nginx.conf` 的 `root` | Nginx 静态文件路径 |
-| `.env` 的 `CONTAINER_MOUNT_ROOT`（如果需要） | 容器挂载目录 |
+> 这是**运维动作**，本仓库只提供受控脚本与 runbook，**不自动执行**。切换会中断线上服务几十秒。
 
-### 4.3 启动方式 / How to start
+前置：
+- [ ] 已在 `/amax/gpu_manager_v2/.env` 配置 SECRET_KEY 及 LLM/监控/清理所需变量
+- [ ] 已 `npm run build`（`frontend/build` 存在）
+- [ ] 已备份 v1（`/amax/gpu_manager` 原样保留即可；cutover 还会把当前 systemd/nginx 配置备份到 `deploy/backup/<时间戳>/`）
+- [ ] ⚠ **数据不迁移**：v2 启动是新空库，无任何用户。切换后需通过 UI/API 重新注册用户、admin 重新分配配额。直接拷贝 v1 `gpu_resource_manager.db` 不受支持（schema 含 v2 新列），需要时按 §7.4 自行迁移。
 
-**开发 / Development**:
+窗口内执行：
 
-启动后端：
 ```bash
-cd ./backend
-/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd /amax/gpu_manager_v2
+sudo bash deploy/gpu-manager-v2-cutover.sh          # 交互确认
+# 或跳过确认：
+sudo bash deploy/install-services.sh --cutover
 ```
 
-启动前端开发服务器（需要 Node.js 16+）：
+脚本步骤（幂等）：备份现有单元/nginx → `disable --now` 停止 v1 的 `gpu-manager-backend`/`gpu-manager-frontend` → 安装 v2 单元并 `enable --now`（backend 接管 :8000）→ nginx 站点切到 v2 → `nginx -t && reload` → 打印服务状态 + HTTP 探测（`/docs`、`/`）。
+
+验证：
+
 ```bash
-cd ./frontend
-npm start
-# 默认运行在 http://localhost:3000，自动代理 API 到后端
+sudo systemctl is-active gpu-manager-backend gpu-manager-frontend nginx
+curl -s http://127.0.0.1:8000/docs | head
+curl -s http://127.0.0.1/api/  -o /dev/null -w '%{http_code}\n'   # 首页/SPA
+sudo journalctl -u gpu-manager-backend -n 50 --no-pager
 ```
 
-**生产 / Production (systemd)**:
-```bash
-# ⚠ 首次从手动进程切换到 systemd 时，先杀掉手动进程（防止8000端口被手动进程占用）
-# lsof -i :8000 -t | xargs kill -9
-# （之后只需下面这行，不再需要手动启动）
+回滚：把 `deploy/backup/<时间戳>/` 里的原 v1 单元与 nginx 站点拷回对应目录、`daemon-reload`、`enable --now gpu-manager-backend` 等 → v1 恢复（v1 代码/库未被改动）。
 
-sudo systemctl restart gpu-manager-backend
-sudo systemctl status gpu-manager-backend
-```
+### 5.3 启动方式 / How to start & logs
 
-**查看日志 / Logs**:
-```bash
-journalctl -u gpu-manager-backend -f
-```
+- **开发**：`cd backend && /opt/anaconda3/bin/python -m uvicorn app.main:app --port 8000 --reload`；前端 `npm start`（:3000，CRA 代理 `/api`→:8000）。
+- **生产**：`sudo systemctl restart gpu-manager-backend`。
+- **日志**：`sudo journalctl -u gpu-manager-backend -f`。
 
-### 4.4 前端重构 / Rebuilding Frontend
+### 5.4 前端重构 / Rebuilding frontend
 
-修改 `frontend/src/` 下的源码后需要重新构建才会生效。
-
-**前提：Node.js 16+**（当前系统为 Node 10，需通过 nvm 切换）：
 ```bash
 source ~/.nvm/nvm.sh && nvm use 18
+cd frontend
+npm run build        # 常规源码修改无需 npm install；新增依赖才需要
 ```
-
-**构建**：
-```bash
-cd ./frontend
-npm run build
-```
-
-构建产物输出到 `frontend/build/`，Nginx 直接读取磁盘文件，**无需重启服务**。
-刷新浏览器（Ctrl+F5 强刷）即可看到更新。
-
-> ⚠ 如果新增了 npm 依赖才需要先执行 `npm install`，常规源码修改只需要 `npm run build`。
-
+构建产物 nginx 直读，`reload`/强刷即可，无需重启后端。CI 校验用 `CI=1 npm run build`。
 
 ---
 
-## 5. API 接口 / API Endpoints
+## 6. API 接口 / API Endpoints
 
-### 认证 / Auth
+> llm 门控：标注 **⚡llm** 的接口要求当前用户 `mode == "llm"`，`traditional` 用户调用返回 **403**（`require_llm_mode`）。标注 **🔒admin** 的接口要求管理员。
+
+### 用户 / Users
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/users/register` | 注册新用户（默认 GPU 配额为 0） |
-| POST | `/api/users/login` | 登录，返回 JWT |
-| GET | `/api/users/me` | 获取当前用户信息（含配额和用量） |
+| POST | `/api/users/register` | 注册（GPU 配额默认 0；mode = MODE_DEFAULT） |
+| POST | `/api/users/login` | 登录 → JWT |
+| GET | `/api/users/me` | 当前用户信息（含配额/用量 + **mode**） |
+| PUT | `/api/users/password` | 修改密码 |
+
+### 模式 / Mode
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/mode` | 当前用户模式（llm/traditional） |
+| PUT | `/api/mode` | 切换当前用户模式（body `{"mode": "llm"|"traditional"}`，非法值 400） |
 
 ### GPU
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/gpus/status` | 实时 GPU 状态（NVML） |
+| GET | `/api/gpus/status` | 实时 GPU 状态（NVML，坏卡显示 ERROR 徽章） |
+| GET | `/api/admin/allocations` | 🔒admin GPU 分配记录 |
 
-### 容器 / Containers
+### 容器 / Containers（含 v2 rebuild/protection）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/containers` | 查看容器列表（用户看自己，admin 看全部） |
+| GET | `/api/containers` | 容器列表（user 看自己 / admin 看全部；含 `cleanup_protected`） |
 | POST | `/api/containers/start` | 启动容器 |
 | DELETE | `/api/containers/{id}` | 停止容器 |
-| DELETE | `/api/containers/{id}/remove` | 删除容器 |
-| POST | `/api/containers/{id}/start` | 重启已停止的容器 |
+| DELETE | `/api/containers/{id}/remove` | 删除容器（用户自己无权删运行中容器） |
+| POST | `/api/containers/{id}/start` | 重启已停止容器 |
+| POST | `/api/containers/{id}/rebuild` | 按 removed 容器的配置快照重建（rebuild 能力） |
+| GET | `/api/containers/{id}/logs` | 容器日志 |
+| PUT | `/api/containers/{id}/protection` | 🔒admin-own/本人：设 `{"protected": true|false}`（入保护池，不再入清理候选） |
+| GET | `/api/images` | 预设镜像列表 |
+| POST | `/api/admin/images` | 🔒admin 添加预设镜像 |
+| DELETE | `/api/admin/images/{id}` | 🔒admin 删除预设镜像 |
+| GET | `/api/admin/config/mount-root` | 🔒admin 查看挂载根目录 |
 
-### 管理 / Admin
+### Agent / 双模式（⚡llm；traditional → 403）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/admin/users` | 用户列表 |
+| GET | `/api/agent/session` | 当前会话上下文（历史消息） |
+| POST | `/api/agent/chat` | 非流式一问一答（LLM 多轮工具循环后返回整段回复） |
+| POST | `/api/agent/chat/stream` | **SSE 流式**：`data:` 帧 `text(delta)` / `tool_use(tool,input)` / `tool_result(tool,ok,result)` / 末尾 `done(reply,tool_trace)` |
+| DELETE | `/api/agent/session` | 清空当前会话 |
+
+### 监控 / Monitor（⚡llm）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/monitor/containers` | user 自己 / admin 全部；带 docker 实时运行态 + cleanup_protected |
+| GET | `/api/monitor/disk` | 最新 DiskSnapshot + 趋势(24) + 实时水位 + docker 可回收明细 |
+| GET | `/api/monitor/candidates` | 🔒admin 当前清理候选（auto/alert 两表 + 决策特征） |
+
+### 管理 / Admin（清理日志 + 告警）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/admin/cleanup-log` | 清理日志（limit 200，倒序） |
+| GET | `/api/admin/alerts` | 告警，未解决优先、时间倒序 |
+| POST | `/api/admin/alerts/{id}/resolve` | 解决一条告警 |
+| GET | `/api/admin/users` | 用户列表（含配额/用量/mode） |
 | PUT | `/api/admin/users/{id}/quota` | 设置 GPU 配额 |
-| GET | `/api/admin/allocations` | GPU 分配记录 |
-| POST | `/api/admin/images` | 添加预设镜像 |
-| DELETE | `/api/admin/images/{id}` | 删除预设镜像 |
-| GET | `/api/admin/config/mount-root` | 查看容器挂载根目录 |
+| DELETE | `/api/admin/users/{id}` | 删除用户 |
+| PUT | `/api/admin/users/reset-password` | 重置密码 |
+| GET | `/api/admin/users/check/{username}` | 用户名可用性检查 |
 
 ---
 
-## 6. 常见问题 / FAQ
+## 7. 常见问题 / FAQ
 
-### 6.1 服务启动失败 / Service fails to start
-
-检查日志：
+### 7.1 服务启动失败 / Service fails to start
 ```bash
-journalctl -u gpu-manager-backend -n 50 --no-pager
+sudo journalctl -u gpu-manager-backend -n 50 --no-pager
 ```
+常见原因：`WorkingDirectory` 错误、依赖未装、`.env` 格式错、**:8000 被 v1 占用导致 bind 失败**（需先走 §5.2 切换）。
 
-常见原因：
-- `WorkingDirectory` 路径错误（迁移后）
-- Python 依赖未安装
-- `.env` 文件格式错误
+### 7.2 Agent 报错 / 无回复 / LLM 未配置
+- `traditional` 模式 → 前端 Agent 页会提示并给切换；直接调 agent API 得 403（预期）。
+- `llm` 模式但 `LLM_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 为空 → 请求 LLM 失败。检查 `.env` 后重启后端（`main.py` 在 import 时读 env，模块级 LLMClient 已冻结，**热改 .env 不生效**）。
+- 流式卡住/整段一次性出 → 确认走 nginx 且用了本仓库 conf（`proxy_buffering off`）。
 
-### 6.2 GPU 状态显示异常 / GPU status error
+### 7.3 清理引擎不动作 / 行为不符预期
+- 先确认 `.env`：`CLEANUP_ENABLED`（默认 true）、磁盘水位 `DISK_THRESHOLD` 是否已达。
+- 该轮只清理「已停止 + 空闲超 `GRACE_DAYS` + 未保护」容器；运行中容器只进 alert 候选，**永不自动停**。
+- dry-run 见 7.5。看日志：`sudo journalctl -u gpu-manager-backend | grep -i cleanup`。
 
-GPU 卡故障时前端会显示紫色 `ERROR` 徽章，表示该 GPU 不可用。这是正常行为，无需操作。
-硬件恢复后重启后端即可恢复正常监测。
+### 7.4 数据迁移 / Database migration
+- SQLite→PostgreSQL：设 `DATABASE_URL`，重启自动建表；数据需手动导（代码不迁移数据）。
+- **v1 库 → v2 库**：不受支持直接拷贝（v2 schema 多 `User.mode`、`ContainerInstance.cleanup_protected`、以及 `container_events/disk_snapshots/cleanup_logs/chat_messages/admin_alerts` 表）。需要时手动 `INSERT ... SELECT` 迁移 `users`/`container_instances`/`gpu_allocations`/`gpu_images` 并补齐新列默认值，再让 v2 建其余表。**最省事：新库重注册用户 + 重配配额**。
 
-### 6.3 用户无法启动容器 / User cannot start container
+### 7.5 Cleanup dry-run 语义
+`CLEANUP_DRY_RUN=true` 时每轮只**记录决策**（日志 action=remove 占位、不删容器不回收空间），用于预演。注意：dry-run 行与真实 remove 一样**计入当日删除上限与冷却**——当天用 dry-run 预演 N 次后再切回真实模式，UTC 零点前可能被限额挡住（设计如此，镜像真实 remove 行以服务日志 UI）。
 
-可能原因：
-- GPU 配额为 0（需 admin 在用户管理页面设置配额）
-- 已有运行中的容器（需先停止）
-- GPU 资源不足
-- 预设镜像不存在
+### 7.6 Nginx 404/500
+- 确认 root = `/amax/gpu_manager_v2/frontend/build` 且已构建。
+- 确认 `proxy_pass http://127.0.0.1:8000` 后端活着（v1/v2 切换后 :8000 归属变了）。
+- `sudo tail -f /var/log/nginx/error.log`。
 
-### 6.4 数据库迁移 / Database migration
-
-如需从 SQLite 切换到 PostgreSQL：
-1. 在 `.env` 中设置 `DATABASE_URL`
-2. 重启后端，FastAPI 会自动创建表
-3. 数据不会自动迁移，需手动导出导入
-
-### 6.5 Nginx 返回 500 或 404
-
-- 确认 `root` 路径指向正确的 `frontend/build` 目录
-- 确认 `proxy_pass` 指向正确的后端地址
-- 检查 nginx 错误日志：`/var/log/nginx/error.log`
+### 7.7 前端切换 mode 后没生效
+前端 ModeContext 每次登录都 `refresh()` 拉服务端 `/api/mode`（权威）；改 `MODE_DEFAULT` 只影响**新注册**用户，存量用户用页面切换或 `PUT /api/mode`。
 
 ---
 
