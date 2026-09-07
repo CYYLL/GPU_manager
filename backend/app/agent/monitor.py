@@ -23,6 +23,20 @@ def _interval_seconds() -> int:
     return int(os.environ.get("MONITOR_INTERVAL", "3600"))
 
 
+def _docker_reclaim_bytes(docker_runner):
+    """DiskSnapshot docker reclaimable columns; never fatal. (0,0,0) when the
+    runner cannot df (e.g. monitor unit stubs / docker down)."""
+    try:
+        fn = getattr(docker_runner, "df", None)
+        if fn is None:
+            return 0, 0, 0
+        from .cleanup import reclaim_breakdown
+        return reclaim_breakdown(fn())
+    except Exception as e:
+        print(f"docker reclaim sample error (non-fatal): {e}")
+        return 0, 0, 0
+
+
 def _disk_usage(root: str):
     """Read disk usage for a mount root.
 
@@ -55,9 +69,13 @@ def sample_once(db: Session, docker_runner) -> int:
             external_stops += 1
 
     usage = _disk_usage(os.environ.get("CONTAINER_MOUNT_ROOT", "/amax"))
+    ctr, img, bc = _docker_reclaim_bytes(docker_runner)
     db.add(models.DiskSnapshot(
         total_bytes=usage.total, used_bytes=usage.used, free_bytes=usage.free,
         usage_percent=usage.used / usage.total * 100,
+        docker_container_reclaimable_bytes=ctr,
+        docker_image_reclaimable_bytes=img,
+        docker_build_cache_reclaimable_bytes=bc,
     ))
     db.commit()
     return external_stops

@@ -388,3 +388,35 @@ class DockerRunner:
             return "Container not found"
         except Exception as e:
             return f"Error: {str(e)}"
+
+    def df(self) -> dict:
+        """docker system df payload (containers/images/build cache sizes)."""
+        if not self.client:
+            return {}
+        try:
+            return self.client.df()
+        except Exception as e:
+            print(f"docker df error: {e}")
+            return {}
+
+    def image_prune(self) -> int:
+        """Prune dangling images once after a cleanup round. Returns bytes freed."""
+        if not self.client:
+            return 0
+        try:
+            res = self.client.images.prune()
+            return int(res.get("SpaceReclaimed", 0))
+        except Exception as e:
+            print(f"docker image prune error: {e}")
+            return 0
+
+    def build_cache_prune(self) -> int:
+        """Prune build cache only (independent of container removal). Returns bytes freed."""
+        if not self.client:
+            return 0
+        try:
+            res = self.client.api.prune_builds()
+            return int(res.get("SpaceReclaimed", 0))
+        except Exception as e:
+            print(f"docker builder prune error: {e}")
+            return 0
