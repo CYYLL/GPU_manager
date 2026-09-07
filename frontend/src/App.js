@@ -8,6 +8,7 @@ import UserProfile from './pages/UserProfile';
 import AdminUsers from './pages/AdminUsers';
 import AdminImages from './pages/AdminImages';
 import AgentChat from './pages/AgentChat';
+import AdminCleanupLog from './pages/AdminCleanupLog';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import UserRoute from './components/UserRoute';
@@ -41,6 +42,9 @@ function App() {
           } />
           <Route path="/admin/images" element={
             <ProtectedRoute><AdminRoute><AdminImages /></AdminRoute></ProtectedRoute>
+          } />
+          <Route path="/admin/cleanup" element={
+            <ProtectedRoute><AdminRoute><AdminCleanupLog /></AdminRoute></ProtectedRoute>
           } />
         </Routes>
       </div>

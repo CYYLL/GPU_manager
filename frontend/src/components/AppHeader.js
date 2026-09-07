@@ -32,12 +32,15 @@ const AppHeader = ({ user }) => {
           <a href="/profile">Profile</a>
           {user?.role === 'admin' && (
             <>
-              <a href="/admin/users" style={{ fontWeight: isAdminPage ? 'bold' : 'normal' }}>
+              <a href="/admin/users" style={{ fontWeight: location.pathname.startsWith('/admin/users') ? 'bold' : 'normal' }}>
                 Admin
+              </a>
+              <a href="/admin/cleanup" style={{ fontWeight: location.pathname.startsWith('/admin/cleanup') ? 'bold' : 'normal' }}>
+                Cleanup
               </a>
               {isAdminPage && (
                 <span style={{ fontSize: 13, color: '#aaa' }}>
-                  [ <a href="/admin/users">Users</a> | <a href="/admin/images">Images</a> ]
+                  [ <a href="/admin/users">Users</a> | <a href="/admin/images">Images</a> | <a href="/admin/cleanup">Cleanup</a> ]
                 </span>
               )}
             </>
