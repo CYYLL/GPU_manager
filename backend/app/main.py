@@ -17,7 +17,7 @@ PROJECT_ROOT = dirname(_BACKEND_DIR)  # project root (parent of backend/)
 load_dotenv(join(PROJECT_ROOT, ".env"))
 
 from .database import engine, Base
-from .routers import users, gpus, containers, mode, agent
+from .routers import users, gpus, containers, mode, agent, monitor
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
@@ -37,6 +37,7 @@ app.include_router(gpus.router)
 app.include_router(containers.router)
 app.include_router(mode.router)
 app.include_router(agent.router)
+app.include_router(monitor.router)
 
 
 # Serve frontend production build

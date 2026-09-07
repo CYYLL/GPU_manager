@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from typing import List
 import uuid
 import secrets
@@ -477,6 +478,24 @@ def get_container_logs(
 
     logs = docker_runner.get_container_logs(instance.container_id, lines=lines)
     return {"logs": logs}
+
+
+class ProtectionUpdate(BaseModel):
+    protected: bool
+
+
+@router.put("/api/containers/{instance_id}/protection")
+def set_protection(instance_id: int, req: ProtectionUpdate,
+                   current_user: models.User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    inst = container_crud.get_container_instance(db, instance_id)
+    if not inst:
+        raise HTTPException(status_code=404, detail="Container instance not found")
+    if current_user.role != "admin" and inst.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    inst.cleanup_protected = req.protected
+    db.commit()
+    return {"protected": inst.cleanup_protected}
 
 
 # Admin: image management
