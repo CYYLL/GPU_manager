@@ -89,3 +89,10 @@ def cleanup_stale_containers():
             print(f"Startup cleanup: released {cleaned} stale container(s) after restart")
     except Exception as e:
         print(f"Startup cleanup warning (non-fatal): {e}")
+
+    # Start background monitor (hourly disk snapshot / retention). Non-fatal.
+    try:
+        from .agent.monitor import start_monitor_thread
+        start_monitor_thread()
+    except Exception as e:
+        print(f"Monitor thread start warning (non-fatal): {e}")
