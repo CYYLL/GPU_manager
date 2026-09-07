@@ -10,11 +10,13 @@ import AdminImages from './pages/AdminImages';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import UserRoute from './components/UserRoute';
+import { ModeProvider } from './context/ModeContext';
 import './App.css';
 
 function App() {
   return (
     <Router>
+      <ModeProvider>
       <div className="app-container">
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -38,6 +40,7 @@ function App() {
           } />
         </Routes>
       </div>
+      </ModeProvider>
     </Router>
   );
 }

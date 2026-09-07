@@ -1,5 +1,6 @@
 import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import ModeToggle from './ModeToggle';
 
 const AppHeader = ({ user }) => {
   const navigate = useNavigate();
@@ -38,6 +39,7 @@ const AppHeader = ({ user }) => {
       </div>
       <div className="user-info">
         <span>{user?.username} ({user?.role})</span>
+        <ModeToggle compact />
         <button className="logout-btn" onClick={handleLogout}>Logout</button>
       </div>
     </header>
