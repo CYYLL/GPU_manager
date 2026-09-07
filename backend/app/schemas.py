@@ -18,6 +18,7 @@ class UserOut(BaseModel):
     role: str
     gpu_quota: int
     is_active: bool
+    mode: str = "llm"  # "llm" | "traditional"（双模式前端展示）
     created_at: Optional[datetime] = None
 
     class Config:
@@ -73,6 +74,7 @@ class ContainerResponse(BaseModel):
     memory_limit: Optional[int] = None
     assigned_port: Optional[int] = None
     access_password: Optional[str] = None
+    cleanup_protected: bool = False  # 清理候选排除（自动清理引擎/前端保护开关）
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None

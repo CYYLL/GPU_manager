@@ -455,6 +455,7 @@ def list_containers(
             memory_limit=inst.memory_limit,
             assigned_port=inst.assigned_port,
             access_password=inst.access_password,
+            cleanup_protected=inst.cleanup_protected,
             created_at=inst.created_at,
             started_at=inst.started_at,
             stopped_at=inst.stopped_at,
