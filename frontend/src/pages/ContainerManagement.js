@@ -111,6 +111,30 @@ const ContainerManagement = () => {
     });
   };
 
+  const handleRebuild = async (instanceId) => {
+    if (!window.confirm('Rebuild this container from its saved snapshot and start it? Workspace data is preserved.')) return;
+    withProcessingId(instanceId, 'rebuilding', async () => {
+      await api.post(`/api/containers/${instanceId}/rebuild`);
+      alert('Container rebuilt and started');
+      fetchContainers();
+    }).catch(err => {
+      alert(err.response?.data?.detail || 'Error rebuilding container');
+    });
+  };
+
+  const handleToggleProtection = async (instanceId, current) => {
+    withProcessingId(instanceId, 'protecting', async () => {
+      await api.put(`/api/containers/${instanceId}/protection`, { protected: !current });
+      fetchContainers();
+    }).catch(err => {
+      alert(err.response?.data?.detail || 'Error updating protection');
+    });
+  };
+
+  const statusColor = (s) => (
+    s === 'running' ? '#52c41a' : s === 'removed' ? '#faad14' : s === 'error' ? '#ff4d4f' : '#888'
+  );
+
   const selectedImage = images.find(img => img.id === parseInt(form.image_id));
 
   return (
@@ -163,7 +187,11 @@ const ContainerManagement = () => {
         </div>
 
         <div className="card">
-          <h2 style={{ marginBottom: 16 }}>My Containers</h2>
+          <h2 style={{ marginBottom: 4 }}>My Containers</h2>
+          <p style={{ fontSize: 12, color: '#999', margin: '0 0 16px' }}>
+            removed = 自动清理仅删除容器、保留工作区，可 <b>Rebuild</b> 一键还原启动；
+            保护 = 该容器不会进入自动清理候选。
+          </p>
           {containers.length === 0 ? (
             <p style={{ color: '#888' }}>No containers running.</p>
           ) : (
@@ -178,6 +206,7 @@ const ContainerManagement = () => {
                   <th>Memory</th>
                   <th>Password</th>
                   <th>Status</th>
+                  <th>保护</th>
                   <th>Action</th>
                 </tr>
               </thead>
@@ -210,12 +239,29 @@ const ContainerManagement = () => {
                       ) : '-'}
                     </td>
                     <td>
-                      <span className="status-badge"
-                        style={{ background: c.status === 'running' ? '#52c41a' : '#888' }}>
-                        {c.status}
+                      <span className="status-badge" style={{ background: statusColor(c.status) }}>
+                        {c.status === 'removed' ? 'removed' : c.status}
                       </span>
                     </td>
                     <td>
+                      <button
+                        className={`protect-btn${c.cleanup_protected ? ' protected' : ''}`}
+                        title={c.cleanup_protected ? '已保护：不会被自动清理' : '未保护：可能被自动清理'}
+                        onClick={() => handleToggleProtection(c.id, c.cleanup_protected)}
+                        disabled={!!processingIds[c.id]}>
+                        {processingIds[c.id] === 'protecting'
+                          ? '…'
+                          : c.cleanup_protected ? '🔒 已保护' : '🔓 保护'}
+                      </button>
+                    </td>
+                    <td>
+                      {c.status === 'removed' && (
+                        <button className="btn btn-primary" onClick={() => handleRebuild(c.id)}
+                          disabled={!!processingIds[c.id]}
+                          style={{ marginRight: 4 }}>
+                          {processingIds[c.id] === 'rebuilding' ? 'Rebuilding...' : 'Rebuild'}
+                        </button>
+                      )}
                       {c.status === 'running' && (
                         <button className="btn btn-danger" onClick={() => handleStop(c.id)}
                           disabled={!!processingIds[c.id]}
