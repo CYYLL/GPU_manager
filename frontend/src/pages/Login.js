@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../services/api';
+import { useMode } from '../context/ModeContext';
 
 const Login = () => {
   const [isRegister, setIsRegister] = useState(false);
@@ -8,6 +9,7 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const { refresh: refreshMode } = useMode();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -22,6 +24,7 @@ const Login = () => {
         localStorage.setItem('tokenType', loginRes.data.token_type);
         const userRes = await api.get('/api/users/me');
         localStorage.setItem('user', JSON.stringify(userRes.data));
+        await refreshMode();   // 同步 ModeContext 到新会话的模式（服务端权威）
         navigate('/');
       } else {
         const response = await api.post('/api/users/login', { username, password });
@@ -29,6 +32,7 @@ const Login = () => {
         localStorage.setItem('tokenType', response.data.token_type);
         const userRes = await api.get('/api/users/me');
         localStorage.setItem('user', JSON.stringify(userRes.data));
+        await refreshMode();
         navigate('/');
       }
     } catch (err) {
