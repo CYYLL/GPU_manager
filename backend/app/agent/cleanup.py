@@ -433,7 +433,8 @@ def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
             # would double count. Reported separately in the summary.
 
         escalated = False
-        if removed > 0:
+        if removed > 0 and not p.dry_run:
+            # Dry runs free nothing → never alert on (in)effectiveness.
             if usage0 <= p.disk_threshold:
                 # Entered via the docker-reclaim trigger → noise-free effectiveness gate.
                 eff, why = would_be_effective(source_freed, p, triggered_by_docker=True)

@@ -128,6 +128,26 @@ def test_cooldown_blocks_second_run(monkeypatch, db, rule_llm):
     assert out["status"] == "cooldown"
 
 
+def test_dry_run_docker_trigger_no_escalation_alert(monkeypatch, db, rule_llm):
+    # Docker-triggered round (usage below threshold): dry run frees nothing, so
+    # the effectiveness gate must NOT raise a spurious capacity alert.
+    _params(monkeypatch, cleanup.CleanupParams(
+        dry_run=True, disk_threshold=90, container_reclaim_trigger_gb=1,
+        min_effective_free_gb=5))
+    u = _u(db)
+    _stopped(db, u, "e" * 64)
+    runner = mock.Mock()
+    runner.df.return_value = {"Containers": [{"ID": "e" * 64, "ImageID": None,
+                                              "SizeRw": 1 * 1024 ** 3}],
+                              "Images": [], "BuildCache": []}
+    runner.is_container_running.return_value = False
+    with mock.patch.object(cleanup.shutil, "disk_usage", return_value=_disk_usage(30)):
+        out = cleanup.run_cleanup_cycle(runner=runner, db=db, llm_client=rule_llm)
+    assert out["removed"] == 1
+    assert out.get("escalated") is False
+    assert db.query(models.AdminAlert).count() == 0
+
+
 def test_daily_cap_blocks(monkeypatch, db, rule_llm):
     _params(monkeypatch, cleanup.CleanupParams(max_per_day=2, cooldown_minutes=0))
     today = cleanup._start_of_today()
