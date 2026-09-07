@@ -118,6 +118,14 @@ def _loop_once():
         retention_prune(db)
     finally:
         db.close()
+    # Cleanup is self-contained (its own lock + session) and guarded by
+    # CLEANUP_ENABLED / cross-process file lock — never let a cycle failure
+    # break the monitor thread.
+    try:
+        from .cleanup import run_cleanup_cycle  # deferred (heavy import)
+        run_cleanup_cycle()
+    except Exception as e:
+        print(f"cleanup cycle error (non-fatal): {e}")
 
 
 def start_monitor_thread():

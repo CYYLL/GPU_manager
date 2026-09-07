@@ -5,6 +5,8 @@ Pure decision logic lives here and is unit-tested; docker/LLM/du are injected
 (runner / llm_client parameters, module-level workspace_bytes_provider hook).
 """
 import os
+import shutil
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -13,6 +15,10 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..crud import containers as crud
+from ..services.docker_runner import DockerRunner
+
+# module-level, replaced in tests
+llm_client = None
 
 
 # ── docker reclaim measurement (pure) ───────────────────────────────────────
@@ -221,3 +227,241 @@ def raise_capacity_alert(db: Session, message: str, level: str, meta: dict):
         return
     db.add(models.AdminAlert(type="capacity", level=level, message=message, meta=meta))
     db.commit()
+
+
+# ── control loop ─────────────────────────────────────────────────────────────
+
+_GB = 1024 ** 3
+_cleanup_lock_fd = None
+_cleanup_thread_lock = threading.Lock()
+
+
+def _lock_path() -> str:
+    return os.environ.get("CLEANUP_LOCK_FILE", "/tmp/gpu_manager_v2_cleanup.lock")
+
+
+def _acquire_global_lock() -> bool:
+    """Thread lock + fcntl.flock (non-blocking). True when this process owns the
+    round. Guarantees a single cleanup round runs at a time across threads AND
+    across FastAPI worker processes."""
+    if not _cleanup_thread_lock.acquire(blocking=False):
+        return False
+    try:
+        import fcntl
+    except ImportError:
+        return True  # non-posix: process-level lock only
+    fd = open(_lock_path(), "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        _cleanup_thread_lock.release()
+        return False
+    globals()["_cleanup_lock_fd"] = fd
+    return True
+
+
+def _release_global_lock():
+    fd = globals().pop("_cleanup_lock_fd", None)
+    if fd is not None:
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fd.close()
+    if _cleanup_thread_lock.locked():
+        _cleanup_thread_lock.release()
+
+
+def _get_llm():
+    global llm_client
+    if llm_client is None:
+        from .llm_client import LLMClient
+        llm_client = LLMClient()
+    return llm_client
+
+
+def _mount_root() -> str:
+    return os.environ.get("CONTAINER_MOUNT_ROOT", "/amax")
+
+
+def _disk_usage_pct() -> float:
+    usage = shutil.disk_usage(_mount_root())
+    return usage.used / usage.total * 100
+
+
+def _start_of_today() -> datetime:
+    """UTC start of the current day (CleanupLog.ts is stored in UTC)."""
+    now = datetime.utcnow()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def removed_today(db: Session) -> int:
+    """Number of automatic removals logged since UTC start of today (daily cap)."""
+    return db.query(models.CleanupLog).filter(
+        models.CleanupLog.action == "remove",
+        models.CleanupLog.ts >= _start_of_today()).count()
+
+
+def _in_cooldown(db: Session, p: CleanupParams) -> bool:
+    cutoff = datetime.utcnow() - timedelta(minutes=p.cooldown_minutes)
+    return db.query(models.CleanupLog).filter(models.CleanupLog.ts > cutoff).first() is not None
+
+
+def _du_workspaces_bytes() -> int:
+    """Total bytes of /amax/gpu-* workspace dirs. Heavy — only called on a
+    suspected low-effect /amax round (design: never in the hourly sample)."""
+    import glob
+    import subprocess
+    dirs = [d for d in glob.glob(os.path.join(_mount_root(), "gpu-*")) if os.path.isdir(d)]
+    total = 0
+    for d in dirs:
+        try:
+            r = subprocess.run(["du", "-sb", d], capture_output=True, text=True, timeout=120)
+            total += int(r.stdout.split()[0])
+        except Exception:
+            continue
+    return total
+
+
+workspace_bytes_provider = _du_workspaces_bytes
+
+
+def _log(db: Session, cid, uid, action, reason, decision_source, freed=0, success=True):
+    db.add(models.CleanupLog(container_instance_id=cid, user_id=uid, action=action,
+                             reason=reason, decision_source=decision_source,
+                             freed_bytes=freed, success=success))
+    db.commit()
+
+
+def _llm_context(p: CleanupParams, usage_pct: float, ctr: int, img: int) -> str:
+    return (f"当前磁盘使用 {usage_pct:.1f}%；容器层可回收约 {(ctr + img) // _GB}GB。"
+            f"每轮最多清理 {p.max_per_round} 个容器。")
+
+
+def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
+    """One guarded cleanup control cycle (called by the monitor thread).
+
+    Pre-exits (disabled / lock busy / daily cap / cooldown / nothing to do),
+    one round of ≤max_per_round removals with per-container TOCTOU re-check and
+    source-level freed measurement, one image prune after the round, builder
+    cache prune when independently due, and post-round effectiveness / capacity
+    escalation. External calls (docker / du / LLM) never hold an open DB txn.
+    """
+    p = CleanupParams.from_env()
+    if not p.enabled:
+        return {"status": "disabled"}
+    if runner is None:
+        runner = DockerRunner()
+    owns_db = db is None
+    if owns_db:
+        from ..database import SessionLocal
+        db = SessionLocal()
+    locked = False
+    try:
+        if not _acquire_global_lock():
+            return {"status": "locked"}
+        locked = True
+
+        if removed_today(db) >= p.max_per_day:
+            return {"status": "daily_cap"}
+        if _in_cooldown(db, p):
+            return {"status": "cooldown"}
+
+        df = runner.df() or {}
+        ctr, img, bc = reclaim_breakdown(df)
+        usage_pct = _disk_usage_pct()
+        usage0 = usage_pct
+
+        # Builder cache maintenance: independent of container removal — prune
+        # whenever the reclaimable build cache crosses its own threshold.
+        build_pruned = 0
+        if bc >= p.build_cache_trigger_gb * _GB and not p.dry_run:
+            build_pruned = runner.build_cache_prune()
+
+        active = usage_pct > p.disk_threshold or (ctr + img) >= p.container_reclaim_trigger_gb * _GB
+        if not active:
+            return {"status": "idle", "build_cache_pruned": build_pruned}
+
+        auto, _alert = build_candidate_lists(db, df, p)
+        if not auto:
+            return {"status": "idle", "reason": "no stopped candidates",
+                    "build_cache_pruned": build_pruned}
+
+        target = p.disk_critical_target if usage_pct > p.disk_critical else p.disk_target
+        llm = llm_client if llm_client is not None else _get_llm()
+        features = decision_features(db, df, auto)
+        sel = llm_select_candidates(llm, features, _llm_context(p, usage_pct, ctr, img), p)
+        decision_source = "llm" if sel is not None else "rule_fallback"
+        sel = (sel if sel is not None else select_by_rule(auto, p.max_per_round))[:p.max_per_round]
+
+        generated_at = datetime.utcnow()
+        removed = 0
+        source_freed = 0
+        image_pruned = 0
+        for cid in sel:
+            ok, reason = toctou_ok(db, cid, generated_at)
+            if not ok:
+                inst = crud.get_container_instance(db, cid)
+                _log(db, cid, inst.user_id if inst else None, "skip", reason, decision_source)
+                continue
+            inst = crud.get_container_instance(db, cid)
+            if runner.is_container_running(inst.container_id):
+                _log(db, cid, inst.user_id, "skip", "docker container running", decision_source)
+                continue
+            est = per_container_estimate(df, inst.container_id)  # source-level, pre-removal
+            if p.dry_run:
+                _log(db, cid, inst.user_id, "remove", "dry-run decision", decision_source,
+                     freed=est, success=True)
+                removed += 1
+                continue
+            mark_ok = crud.mark_container_removed(db, cid, runner, source="agent")
+            _log(db, cid, inst.user_id, "remove", "", decision_source, freed=est, success=mark_ok)
+            if mark_ok:
+                removed += 1
+                source_freed += est
+            usage_pct = _disk_usage_pct()
+            if usage_pct <= target:
+                break  # target reached — stop the round
+
+        if removed > 0 and not p.dry_run:
+            image_pruned = runner.image_prune()   # once per round, never per container
+            # image_pruned is NOT folded into source_freed: per_container_estimate
+            # already attributes dangling-image layers to the removed container
+            # (ImageID SizeRootFs when the image dangles), so adding it again here
+            # would double count. Reported separately in the summary.
+
+        escalated = False
+        if removed > 0:
+            if usage0 <= p.disk_threshold:
+                # Entered via the docker-reclaim trigger → noise-free effectiveness gate.
+                eff, why = would_be_effective(source_freed, p, triggered_by_docker=True)
+                if not eff:
+                    level = "critical" if usage_pct > p.disk_critical else "warning"
+                    raise_capacity_alert(
+                        db,
+                        f"清理回收低于有效阈值（源头测量 {source_freed} 字节），容器层无更多可回收空间",
+                        level, {"source_freed": source_freed})
+                    escalated = True
+            elif usage_pct > p.disk_threshold:
+                # /amax path still over threshold after the round → structural check.
+                used_bytes = shutil.disk_usage(_mount_root()).used
+                ws = workspace_bytes_provider()
+                if used_bytes and ws / used_bytes > p.workspace_dominant_pct / 100.0:
+                    level = "critical" if usage_pct > p.disk_critical else "warning"
+                    raise_capacity_alert(
+                        db,
+                        "磁盘不足由用户工作空间占用导致（结构性），容器清理无法释放有效空间，"
+                        "请管理员扩容或引导用户清理工作区",
+                        level, {"workspace_bytes": ws})
+                    escalated = True
+
+        return {"status": "ok", "removed": removed, "decision_source": decision_source,
+                "source_freed": source_freed, "image_pruned": image_pruned,
+                "build_cache_pruned": build_pruned, "escalated": escalated}
+    finally:
+        if locked:
+            _release_global_lock()
+        if owns_db:
+            db.close()
