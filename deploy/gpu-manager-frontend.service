@@ -1,12 +1,15 @@
 [Unit]
-Description=GPU Resource Manager Frontend (Static Server)
+Description=GPU Resource Manager v2 Frontend (Static Server)
 After=network.target
 
 [Service]
 Type=simple
 User=amax
 Environment="NVM_DIR=/amax/.nvm"
-ExecStart=/bin/bash -c 'source $NVM_DIR/nvm.sh && npx serve -s /amax/gpu_manager/frontend/build -l 3000 --no-clipboard'
+# Port 3001: nginx already serves frontend/build on :80 — this unit is an
+# optional convenience for direct :3001 access (v1's crash-looped :3000 unit is
+# not reused). Requires `npm run build` in /amax/gpu_manager_v2/frontend first.
+ExecStart=/bin/bash -c 'source $NVM_DIR/nvm.sh && npx serve -s /amax/gpu_manager_v2/frontend/build -l 3001 --no-clipboard'
 Restart=always
 RestartSec=5
 

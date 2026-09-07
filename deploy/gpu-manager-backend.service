@@ -1,15 +1,22 @@
 [Unit]
-Description=GPU Resource Manager Backend
+Description=GPU Resource Manager v2 Backend
 After=network.target docker.service
 Requires=docker.service
 
 [Service]
 Type=simple
 User=amax
-WorkingDirectory=/amax/gpu_manager/backend
-Environment="SECRET_KEY=you-need-to-change-this-in-production"
-Environment="CORS_ORIGINS=http://localhost:3000,http://localhost,http://127.0.0.1"
-Environment="CONTAINER_MOUNT_ROOT=/amax"
+# WorkingDirectory anchors the default SQLite path: DATABASE_URL is unset so
+# app/database.py falls back to sqlite:///./gpu_resource_manager.db relative to
+# cwd  →  backend/gpu_resource_manager.db  (v2's OWN database; v1 data is NOT
+# carried over — see docs/deployment.md §数据迁移).
+WorkingDirectory=/amax/gpu_manager_v2/backend
+# All configuration lives in <project root>/.env, which app.main loads via
+# python-dotenv (load_dotenv(PROJECT_ROOT/.env)) BEFORE routers are imported.
+# Do NOT hardcode SECRET_KEY / CORS_ORIGINS / LLM_* here: python-dotenv does not
+# override vars already present in the process environment, so a value set in
+# this unit would silently shadow the .env one. Missing .env → insecure
+# defaults from app/config.py — always ship a real .env.
 ExecStart=/home/amax/.local/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
