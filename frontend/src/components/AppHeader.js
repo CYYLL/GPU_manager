@@ -1,10 +1,12 @@
 import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import ModeToggle from './ModeToggle';
+import { useMode } from '../context/ModeContext';
 
 const AppHeader = ({ user }) => {
   const navigate = useNavigate();
   const location = useLocation();
+  const { mode } = useMode();
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -21,6 +23,11 @@ const AppHeader = ({ user }) => {
         <h1><a href="/" style={{ color: '#fff', textDecoration: 'none' }}>GPU Resource Manager</a></h1>
         <nav>
           <a href="/dashboard">Dashboard</a>
+          {mode === 'llm' && (
+            <a href="/chat" style={{ fontWeight: location.pathname.startsWith('/chat') ? 'bold' : 'normal' }}>
+              Agent
+            </a>
+          )}
           {user?.role !== 'admin' && <a href="/containers">Containers</a>}
           <a href="/profile">Profile</a>
           {user?.role === 'admin' && (

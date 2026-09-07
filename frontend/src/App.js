@@ -7,6 +7,7 @@ import ContainerManagement from './pages/ContainerManagement';
 import UserProfile from './pages/UserProfile';
 import AdminUsers from './pages/AdminUsers';
 import AdminImages from './pages/AdminImages';
+import AgentChat from './pages/AgentChat';
 import ProtectedRoute from './components/ProtectedRoute';
 import AdminRoute from './components/AdminRoute';
 import UserRoute from './components/UserRoute';
@@ -28,6 +29,9 @@ function App() {
           } />
           <Route path="/containers" element={
             <ProtectedRoute><UserRoute><ContainerManagement /></UserRoute></ProtectedRoute>
+          } />
+          <Route path="/chat" element={
+            <ProtectedRoute><AgentChat /></ProtectedRoute>
           } />
           <Route path="/profile" element={
             <ProtectedRoute><UserProfile /></ProtectedRoute>
