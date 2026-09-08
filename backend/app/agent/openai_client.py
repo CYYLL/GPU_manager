@@ -80,10 +80,14 @@ class OpenAIClient(BaseLLMClient):
                             "function": {"name": block["name"],
                                          "arguments": json.dumps(block.get("input", {}),
                                                                  ensure_ascii=False)}})
-                assistant = {"role": "assistant", "content": "".join(text_parts) or ""}
                 if tool_calls:
-                    assistant["tool_calls"] = tool_calls
-                out.append(assistant)
+                    # Strict OpenAI-compatible servers (vLLM et al.) reject an
+                    # assistant turn that carries both tool_calls and non-null
+                    # content; agent_loop never emits text beside tool_use in a
+                    # single turn, so omit content whenever tool_calls are present.
+                    out.append({"role": "assistant", "tool_calls": tool_calls})
+                else:
+                    out.append({"role": "assistant", "content": "".join(text_parts) or ""})
             elif role == "user":
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":

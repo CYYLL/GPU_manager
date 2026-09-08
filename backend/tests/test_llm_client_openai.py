@@ -119,7 +119,7 @@ def test_to_openai_messages_splits_tool_blocks():
     ])
     assert out == [
         {"role": "user", "content": "查一下"},
-        {"role": "assistant", "content": "",
+        {"role": "assistant",
          "tool_calls": [{"id": "t1", "type": "function",
                          "function": {"name": "get_gpu_status",
                                       "arguments": json.dumps({"all": True},
@@ -225,3 +225,66 @@ def test_stream_disabled_uses_emulated_single_chunk(monkeypatch):
     assert {"type": "text", "delta": "全量回复"} in events
     assert {"type": "tool_use", "id": "a", "name": "x", "input": {}} in events
     assert client.complete.call_count == 1
+
+
+def test_to_openai_messages_non_ascii_tool_input_stays_unescaped():
+    out = OpenAIClient._to_openai_messages([
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "stop_container",
+             "input": {"note": "查卡"}}]},
+    ])
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(args) == {"note": "查卡"}
+    assert "查卡" in args  # raw UTF-8, not 查卡
+
+
+def test_run_agent_roundtrip_assembles_openai_legal_messages(monkeypatch):
+    from app.agent.agent_loop import run_agent
+
+    _set_env(monkeypatch)
+    responses = [
+        _response(_choice("", tool_calls=[{"id": "c1", "name": "list_containers",
+                                           "arguments": "{}"}], finish_reason="tool_calls")),
+        _response(_choice("你有 1 个容器", finish_reason="stop")),
+    ]
+    sdk = mock.Mock()
+    sdk.chat.completions.create.side_effect = responses
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: sdk)
+
+    client = OpenAIClient()
+    out = run_agent(
+        client, "你是助手",
+        [{"role": "user", "content": "我有几个容器？"}],
+        [{"name": "list_containers", "description": "列出容器",
+          "input_schema": {"type": "object", "properties": {}}}],
+        lambda name, inp: (True, "1 个容器"),
+        max_calls=2)
+
+    assert out["reply"] == "你有 1 个容器"
+    calls = [c.kwargs for c in sdk.chat.completions.create.call_args_list]
+    assert len(calls) == 2
+    first, second = calls[0]["messages"], calls[1]["messages"]
+
+    assert first == [{"role": "system", "content": "你是助手"},
+                     {"role": "user", "content": "我有几个容器？"}]
+
+    # round 2 transcript: system, user, assistant(tool_calls c1, no content), tool(c1)
+    assert second[0] == {"role": "system", "content": "你是助手"}
+    assert second[1] == {"role": "user", "content": "我有几个容器？"}
+    asst = second[2]
+    assert asst["role"] == "assistant"
+    assert "content" not in asst
+    assert asst["tool_calls"] == [{"id": "c1", "type": "function",
+                                   "function": {"name": "list_containers", "arguments": "{}"}}]
+    assert second[3] == {"role": "tool", "tool_call_id": "c1", "content": "1 个容器"}
+
+
+def test_stream_malformed_tool_arguments_defaults_to_empty(monkeypatch):
+    _set_env(monkeypatch)
+    chunks = iter([
+        _chunk(delta_tools=[_tool_delta(0, id_="t1", name="f", arguments="not-json{")]),
+    ])
+    _mk_openai(monkeypatch, create_retval=chunks)
+    events = list(OpenAIClient().stream_complete("s", [{"role": "user", "content": "hi"}]))
+    tool = [e for e in events if e["type"] == "tool_use"]
+    assert tool == [{"type": "tool_use", "id": "t1", "name": "f", "input": {}}]
