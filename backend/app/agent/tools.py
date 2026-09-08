@@ -22,7 +22,7 @@ docker_runner = DockerRunner()
 gpu_monitor = get_gpu_monitor()
 
 TOOLS: List[Dict] = [
-    {"name": "list_containers", "description": "列出当前用户的所有容器",
+    {"name": "list_containers", "description": "列出容器（普通用户只看到自己的容器，管理员可看到所有用户的所有容器）",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_container_status", "description": "查询指定容器的实时状态",
      "input_schema": {"type": "object", "properties": {
@@ -82,14 +82,19 @@ class ToolExecutor:
 
     # ── tools ──────────────────────────────────────────────
     def _tool_list_containers(self, inp) -> Tuple[bool, str]:
-        insts = container_crud.get_user_containers(self.db, self.user.id)
+        # 普通用户只能看到自己的容器；admin 可枚举所有用户的所有容器(每行标注 user= 所属)。
+        is_admin = self.user.role == "admin"
+        insts = (container_crud.get_all_containers(self.db)
+                 if is_admin
+                 else container_crud.get_user_containers(self.db, self.user.id))
         lines = []
         for i in insts:
             running = docker_runner.is_container_running(i.container_id)
+            owner = f" user={i.user.username}" if is_admin else ""
             lines.append(
                 f"- id={i.id} container_id={i.container_id} image={i.image} "
                 f"status={i.status} docker_running={running} gpu={i.gpu_ids} "
-                f"protected={i.cleanup_protected} port={i.assigned_port}"
+                f"protected={i.cleanup_protected} port={i.assigned_port}{owner}"
             )
         return True, "\n".join(lines) if lines else "（没有容器）"
 
@@ -100,9 +105,10 @@ class ToolExecutor:
         if not self._owner_or_admin(inst):
             return False, "未授权：只能查看自己的容器"
         running = docker_runner.is_container_running(inst.container_id)
+        owner = f" user={inst.user.username}" if self.user.role == "admin" else ""
         return True, (f"id={inst.id} image={inst.image} status={inst.status} "
                       f"docker_running={running} gpu={inst.gpu_ids} "
-                      f"last_used_ts={container_crud.get_last_used(self.db, inst.id)}")
+                      f"last_used_ts={container_crud.get_last_used(self.db, inst.id)}{owner}")
 
     def _tool_get_gpu_status(self, inp) -> Tuple[bool, str]:
         allocated = container_crud.get_allocated_gpu_ids(self.db)

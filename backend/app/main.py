@@ -16,6 +16,29 @@ PROJECT_ROOT = dirname(_BACKEND_DIR)  # project root (parent of backend/)
 #    read env vars at import time. ──
 load_dotenv(join(PROJECT_ROOT, ".env"))
 
+# ── App logging: give every `app.*` logger an INFO StreamHandler to stderr.
+#    Without this, Python's default config drops INFO records entirely (only a
+#    WARNING+ lastResort reaches journal), so agent run health would be silent.
+#    uvicorn keeps its own access/error handlers (propagate off), so nothing
+#    double-prints. Must run BEFORE `.routers` imports so constructor-time
+#    logs (agent client selection, etc.) are captured too. ──
+import logging
+import sys
+
+
+def _configure_logging():
+    lg = logging.getLogger("app")
+    lg.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    if not lg.handlers:  # idempotent across reloads
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        lg.addHandler(handler)
+    lg.propagate = False  # handled here; never bubble to root
+
+
+_configure_logging()
+
 from .database import engine, Base
 from .routers import users, gpus, containers, mode, agent, monitor
 

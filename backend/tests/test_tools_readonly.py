@@ -85,6 +85,35 @@ def test_list_containers_only_own(monkeypatch, db):
     assert text.count("a" * 12) >= 1 and text.count("b" * 12) == 0
 
 
+def test_admin_list_sees_all_users_containers(monkeypatch, db):
+    admin = _mk_user(db, "root", role="admin")
+    _mk_inst(db, admin, container_id="a" * 64)
+    other = _mk_user(db, "pat")
+    _mk_inst(db, other, container_id="b" * 64)
+    stub = type("DockerStub", (), {"is_container_running": lambda self, cid: True})()
+    monkeypatch.setattr(agent_tools, "docker_runner", stub)
+
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("list_containers", {})
+    assert ok is True
+    assert text.count("a" * 12) >= 1
+    assert text.count("b" * 12) >= 1
+    assert "user=root" in text and "user=pat" in text
+
+
+def test_admin_get_status_allows_other_owner(monkeypatch, db):
+    admin = _mk_user(db, "root", role="admin")
+    other = _mk_user(db, "quin")
+    inst = _mk_inst(db, other, container_id="c" * 64)
+    stub = type("DockerStub", (), {"is_container_running": lambda self, cid: True})()
+    monkeypatch.setattr(agent_tools, "docker_runner", stub)
+
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("get_container_status", {"id": inst.id})
+    assert ok is True
+    assert "user=quin" in text
+
+
 def test_get_status_denies_other_owner(monkeypatch, db):
     u = _mk_user(db)
     other = _mk_user(db, "quin")
