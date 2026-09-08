@@ -49,7 +49,8 @@ const AppHeader = ({ user }) => {
       </div>
       <div className="user-info">
         <span>{user?.username} ({user?.role})</span>
-        <ModeToggle compact />
+        {/* 模式开关仅在 GPU Resource Manager 主页(/)允许切换，其它页面不显示 */}
+        {location.pathname === '/' && <ModeToggle compact />}
         <button className="logout-btn" onClick={handleLogout}>Logout</button>
       </div>
     </header>

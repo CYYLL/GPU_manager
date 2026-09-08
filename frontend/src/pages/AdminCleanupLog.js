@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import AppHeader from '../components/AppHeader';
-import ModeToggle from '../components/ModeToggle';
 import { useMode } from '../context/ModeContext';
 
 const GB = 1024 ** 3;
@@ -73,7 +72,6 @@ const AdminCleanupLog = () => {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 style={{ margin: 0 }}>清理监控 / Admin Cleanup</h2>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <ModeToggle />
             <button className="btn btn-primary" onClick={fetchAll} disabled={loading}>
               {loading ? '刷新中…' : '刷新'}
             </button>
@@ -87,9 +85,9 @@ const AdminCleanupLog = () => {
             <h3>磁盘与候选（需要 LLM 模式）</h3>
             <p style={{ color: '#888', fontSize: 13 }}>
               <code>/api/monitor/disk</code> 与 <code>/api/monitor/candidates</code> 仅 LLM 模式可读
-              （传统模式 403）。切换到 LLM 模式查看磁盘水位与自动清理候选。
+              （传统模式 403）。模式开关仅在 GPU Resource Manager 主页可用——
+              切到 LLM 模式后再返回本页查看磁盘水位与自动清理候选。
             </p>
-            <ModeToggle />
           </div>
         )}
 
