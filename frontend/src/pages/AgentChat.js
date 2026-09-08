@@ -7,6 +7,61 @@ import AppHeader from '../components/AppHeader';
 
 let nextId = 1;
 
+// 工具结果默认折叠展示，可展开看全部 —— 有大小上限但不破坏语义：
+// 上限作用于“展示层”，切分只发生在行/词边界，绝不在一个数字/词中间切断；
+// 完整结果始终保存在 chip 里，点“展开”即可看全，因此被折叠的信息没有丢失。
+const COLLAPSED_LINES = 8;      // 折叠时最多展示的行数
+const MAX_PREVIEW_CHARS = 800;  // 折叠预览的总字符上限（超出部分按行/词截断）
+
+// 在给定预算内，从「能完整放下多少行」开始，最后一行若放不下则退化到词边界截断。
+function makePreview(lines) {
+  const n = Math.min(lines.length, COLLAPSED_LINES);
+  let budget = MAX_PREVIEW_CHARS;
+  const kept = [];
+  for (let i = 0; i < n; i++) {
+    const line = lines[i];
+    if (line.length <= budget) {
+      kept.push(line);
+      budget -= line.length + 1;  // +1 for the '\n' separator
+      if (budget < 0) break;
+      continue;
+    }
+    // 单行超预算：只在词边界截断，绝不把一个值劈成两半。
+    let cut = line.slice(0, Math.max(budget, 0));
+    const lastSpace = cut.lastIndexOf(' ');
+    if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+    kept.push(cut + ' …');
+    break;
+  }
+  return kept.join('\n');
+}
+
+function ToolChip({ c }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = (c.summary || '').split('\n');
+  const preview = makePreview(lines);
+  // 存在比折叠展示更多的内容，或单行被截断 → 需要“展开/收起”
+  const collapsible =
+    expanded || lines.length > COLLAPSED_LINES || preview.length < (c.summary || '').length;
+  const hidden = lines.length - preview.split('\n').length;
+  return (
+    <div className={`tool-chip tool-${c.status}`}>
+      <span className="tool-chip-icon">
+        {c.status === 'running' ? '⋯' : c.status === 'ok' ? '✓' : '✗'}
+      </span>
+      <span className="tool-chip-name">{c.tool}</span>
+      {c.summary && (
+        <span className="tool-chip-summary">{expanded ? lines.join('\n') : preview}</span>
+      )}
+      {collapsible && (
+        <button type="button" className="tool-chip-more" onClick={() => setExpanded((e) => !e)}>
+          {expanded ? '收起' : `展开（${hidden > 0 ? `还有 ${hidden} 行，` : ''}查看全文）`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 const AgentChat = () => {
   const { mode, confirmed, loading: modeLoading } = useMode();
   const navigate = useNavigate();
@@ -90,12 +145,14 @@ const AgentChat = () => {
             if (chips[i].tool === tool && chips[i].status === 'running') { idx = i; break; }
           }
           const status = ok ? 'ok' : 'fail';
-          const summary = (result || '').replace(/\s+/g, ' ').trim();
+          // 完整保留工具结果（含换行、不截断）——展示层按行折叠，展开时仍可看全。
+          // 若这里截断，折叠后再展开也无法恢复被切掉的语义。
+          const summary = (result || '').trim();
           const chip = {
             key: nextId++,
             tool,
             status,
-            summary: summary.length > 160 ? summary.slice(0, 160) + '…' : summary,
+            summary,
           };
           if (idx >= 0) chips[idx] = chip; else chips.push(chip);
           return { ...a, chips };
@@ -159,15 +216,7 @@ const AgentChat = () => {
                     {m.streaming && <span className="chat-typing" />}
                     {m.role === 'assistant' && m.chips.length > 0 && (
                       <div className="chat-chips">
-                        {m.chips.map((c) => (
-                          <div key={c.key} className={`tool-chip tool-${c.status}`}>
-                            <span className="tool-chip-icon">
-                              {c.status === 'running' ? '⋯' : c.status === 'ok' ? '✓' : '✗'}
-                            </span>
-                            <span className="tool-chip-name">{c.tool}</span>
-                            {c.summary && <span className="tool-chip-summary">{c.summary}</span>}
-                          </div>
-                        ))}
+                        {m.chips.map((c) => <ToolChip key={c.key} c={c} />)}
                       </div>
                     )}
                   </div>

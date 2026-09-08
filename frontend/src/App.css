@@ -201,7 +201,7 @@ tr:hover td { background: #f5f5f5; }
 @keyframes blink { 50% { opacity: 0; } }
 .chat-chips { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
 .tool-chip {
-  display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: #444;
+  display: flex; align-items: flex-start; gap: 6px; font-size: 12px; color: #444;
   background: #fff; border: 1px solid #e3e6ea; border-radius: 6px; padding: 3px 8px;
 }
 .tool-chip-icon { font-weight: bold; }
@@ -209,7 +209,14 @@ tr:hover td { background: #f5f5f5; }
 .tool-ok .tool-chip-icon { color: #52c41a; }
 .tool-fail .tool-chip-icon { color: #ff4d4f; }
 .tool-chip-name { font-family: monospace; font-weight: bold; flex-shrink: 0; }
-.tool-chip-summary { color: #777; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 完整展示工具结果：允许换行、不裁行内内容（多行结果保留换行，pre-wrap）。
+   默认折叠为前几行控制体积；超出部分通过“展开”按需看全，语义始终可达。 */
+.tool-chip-summary { color: #777; flex: 1 1 auto; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+.tool-chip-more {
+  flex-shrink: 0; align-self: center; margin-left: 2px; padding: 0 4px;
+  font-size: 11px; color: #1677ff; background: none; border: none; cursor: pointer;
+}
+.tool-chip-more:hover { text-decoration: underline; }
 .chat-error { color: #ff4d4f; font-size: 13px; margin-top: 8px; }
 .chat-input-row { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; }
 .chat-input {

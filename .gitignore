@@ -1,6 +1,8 @@
 *.pyc
 __pycache__/
 *.db
+*.db-shm
+*.db-wal
 
 # v1→v2 migration & cutover backups (DB dumps + systemd unit copies)
 deploy/backup/

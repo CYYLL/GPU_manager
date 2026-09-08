@@ -60,6 +60,39 @@ TOOLS: List[Dict] = [
 _SRC = "llm"
 
 
+def _pct(v) -> str:
+    """Round a utilization percentage to an integer for terse output."""
+    try:
+        return f"{float(v):.0f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _short_gpu_name(name) -> str:
+    """Trim verbose vendor prefixes so GPU lines stay short (RTX 3090, not
+    NVIDIA GeForce RTX 3090). Falls back to the original label."""
+    n = (name or "").strip()
+    low = n.lower()
+    for prefix in ("nvidia geforce ", "nvidia tesla ", "nvidia quadro ", "nvidia "):
+        if low.startswith(prefix):
+            n = n[len(prefix):]
+            break
+    return n or (name or "")
+
+
+def _human_bytes(b: float) -> str:
+    """Compact human size: 12.3G / 456M / 890K, avoiding 20-char ints."""
+    try:
+        b = float(b)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if abs(b) < 1024:
+            return f"{b:.0f}{unit}" if unit == "B" else f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}E"
+
+
 class ToolExecutor:
     def __init__(self, db: Session, user: models.User):
         self.db = db
@@ -92,7 +125,7 @@ class ToolExecutor:
             running = docker_runner.is_container_running(i.container_id)
             owner = f" user={i.user.username}" if is_admin else ""
             lines.append(
-                f"- id={i.id} container_id={i.container_id} image={i.image} "
+                f"- id={i.id} cid={i.container_id[:12]} image={i.image} "
                 f"status={i.status} docker_running={running} gpu={i.gpu_ids} "
                 f"protected={i.cleanup_protected} port={i.assigned_port}{owner}"
             )
@@ -108,6 +141,7 @@ class ToolExecutor:
         owner = f" user={inst.user.username}" if self.user.role == "admin" else ""
         return True, (f"id={inst.id} image={inst.image} status={inst.status} "
                       f"docker_running={running} gpu={inst.gpu_ids} "
+                      f"protected={inst.cleanup_protected} "
                       f"last_used_ts={container_crud.get_last_used(self.db, inst.id)}{owner}")
 
     def _tool_get_gpu_status(self, inp) -> Tuple[bool, str]:
@@ -115,16 +149,16 @@ class ToolExecutor:
         statuses = gpu_monitor.get_gpu_status(allocated_gpu_ids=allocated)
         if not statuses:
             return True, "（无法读取 GPU 状态）"
-        lines = [f"- gpu={g['id']} name={g['name']} mem={g['memory_utilization']}% "
-                 f"util={g['gpu_utilization']}% busy_allocated={g['allocated']}"
+        lines = [f"- gpu={g['id']} {_short_gpu_name(g['name'])} mem={_pct(g['memory_utilization'])}% "
+                 f"util={_pct(g['gpu_utilization'])}% busy_allocated={g['allocated']}"
                  for g in statuses]
         return True, "\n".join(lines)
 
     def _tool_get_disk_status(self, inp) -> Tuple[bool, str]:
         usage = shutil.disk_usage(os.environ.get("CONTAINER_MOUNT_ROOT", "/amax"))
         pct = usage.used / usage.total * 100
-        return True, (f"total={usage.total} used={usage.used} free={usage.free} "
-                      f"usage_pct={pct:.1f}%")
+        return True, (f"usage_pct={pct:.1f}% used={_human_bytes(usage.used)} "
+                      f"free={_human_bytes(usage.free)} total={_human_bytes(usage.total)}")
 
     def _tool_list_images(self, inp) -> Tuple[bool, str]:
         images = container_crud.get_images(self.db)
