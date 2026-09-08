@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../services/api';
 import { streamChat } from '../services/agentStream';
+import { useNavigate } from 'react-router-dom';
 import { useMode } from '../context/ModeContext';
-import ModeToggle from '../components/ModeToggle';
 import AppHeader from '../components/AppHeader';
 
 let nextId = 1;
 
 const AgentChat = () => {
   const { mode, loading: modeLoading } = useMode();
+  const navigate = useNavigate();
   const [user, setUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -124,22 +125,17 @@ const AgentChat = () => {
     }
   };
 
-  const needsLlm = !modeLoading && mode !== 'llm';
+  // 传统模式：不展示 Agent/LLM 说明卡，直接回到主页（/）。顶栏 ModeToggle 可随时切回 LLM 模式后再进入。
+  useEffect(() => {
+    if (!modeLoading && mode !== 'llm') navigate('/', { replace: true });
+  }, [mode, modeLoading, navigate]);
+
+  if (modeLoading || mode !== 'llm') return null; // 解析模式中 / 传统模式 → 定位到主页
 
   return (
     <div>
       <AppHeader user={user} />
       <div className="content">
-        {needsLlm ? (
-          <div className="card">
-            <h2>Agent 助手（LLM 模式）</h2>
-            <p style={{ color: '#888' }}>
-              当前为<b>传统模式</b>。Agent 助手由 LLM 编排容器生命周期（查询/创建/停止/清理保护/重建等），
-              需切换到 LLM 模式使用。切换后页面临时入口即出现（/api/agent/* 传统模式返回 403）。
-            </p>
-            <ModeToggle />
-          </div>
-        ) : (
           <div className="card chat-card">
             <div className="chat-head">
               <h2 style={{ margin: 0 }}>Agent 助手</h2>
@@ -197,7 +193,6 @@ const AgentChat = () => {
               </button>
             </div>
           </div>
-        )}
       </div>
     </div>
   );
