@@ -1,0 +1,141 @@
+"""OpenAI Chat Completions client (official OpenAI + OpenAI-compatible endpoints).
+
+Env (read only when LLM_PROVIDER=openai):
+  OPENAI_API_KEY   required
+  OPENAI_BASE_URL  optional, default https://api.openai.com/v1; put a compat
+                   endpoint here (e.g. Ark /api/v3 or a vLLM /v1 server)
+  OPENAI_MODEL     required (no built-in default: prevents accidental billing)
+  OPENAI_STREAMING auto|true|false (same semantics as LLM_STREAMING)
+
+All protocol conversion lives here (boundary A): the agent loop still speaks
+Anthropic-style messages; this class translates to/from OpenAI Chat Completions
+and exposes the neutral complete()/stream_complete() shapes. This module never
+reads LLM_*/ANTHROPIC_* env vars, so an anthropic gateway key cannot leak in.
+"""
+import json
+import os
+from typing import Iterator, List, Dict, Optional
+
+from .llm_client import BaseLLMClient, LLMResult
+
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def _require(env_var: str) -> str:
+    value = os.environ.get(env_var, "").strip()
+    if not value:
+        raise ValueError("%s must be set when LLM_PROVIDER=openai" % env_var)
+    return value
+
+
+class OpenAIClient(BaseLLMClient):
+    def __init__(self):
+        super().__init__(
+            api_key=_require("OPENAI_API_KEY"),
+            base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL,
+            model=_require("OPENAI_MODEL"),
+            streaming=os.environ.get("OPENAI_STREAMING", "auto"),
+        )
+        from openai import OpenAI  # lazy: only when this provider is chosen
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url,
+                             timeout=self.timeout, max_retries=self.max_retries)
+
+    # ── outbound: tools & messages ─────────────────────────────────
+    @staticmethod
+    def _to_openai_tools(tools: Optional[List[Dict]]) -> Optional[List[Dict]]:
+        """[{name,description,input_schema}] -> OpenAI function tools; None when empty."""
+        if not tools:
+            return None
+        return [{"type": "function",
+                 "function": {"name": t["name"], "description": t["description"],
+                              "parameters": t.get("input_schema", {"type": "object"})}}
+                for t in tools]
+
+    @staticmethod
+    def _to_openai_messages(messages: List[Dict]) -> List[Dict]:
+        """Translate agent messages to OpenAI chat format.
+
+        Plain {role, content: str} pass through. Anthropic content-block turns
+        (built by agent_loop only, as tool feedback) are split: assistant
+        tool_use -> assistant message with tool_calls; user tool_result ->
+        role:"tool" messages keyed by tool_call_id.
+        """
+        out: List[Dict] = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                out.append({"role": role, "content": content})
+                continue
+            if role == "assistant":
+                text_parts: List[str] = []
+                tool_calls: List[Dict] = []
+                for block in content:
+                    btype = block.get("type") if isinstance(block, dict) else ""
+                    if btype == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        tool_calls.append({
+                            "id": block["id"], "type": "function",
+                            "function": {"name": block["name"],
+                                         "arguments": json.dumps(block.get("input", {}),
+                                                                 ensure_ascii=False)}})
+                assistant = {"role": "assistant", "content": "".join(text_parts) or ""}
+                if tool_calls:
+                    assistant["tool_calls"] = tool_calls
+                out.append(assistant)
+            elif role == "user":
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        out.append({"role": "tool",
+                                    "tool_call_id": block["tool_use_id"],
+                                    "content": str(block.get("content", ""))})
+            else:
+                out.append({"role": role, "content": str(content)})
+        return out
+
+    # ── inbound ────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_choice(choice) -> LLMResult:
+        """One chat completion choice -> neutral LLMResult."""
+        message = getattr(choice, "message", None)
+        text_parts: List[str] = []
+        if message is not None:
+            body = getattr(message, "content", None)
+            if isinstance(body, str):
+                text_parts.append(body)
+            elif body:  # a few compat endpoints return content segments as a list
+                for part in body:
+                    if isinstance(part, str):
+                        text_parts.append(part)
+                    elif getattr(part, "type", "") == "text":
+                        text_parts.append(getattr(part, "text", "") or "")
+        tool_calls: List[Dict] = []
+        if message is not None:
+            for tc in (getattr(message, "tool_calls", None) or []):
+                fn = getattr(tc, "function", None)
+                raw = getattr(fn, "arguments", "") or ""
+                try:
+                    inp = json.loads(raw) if raw else {}
+                except Exception:
+                    inp = {}
+                tool_calls.append({"id": getattr(tc, "id", None),
+                                   "name": getattr(fn, "name", "") or "",
+                                   "input": inp})
+        return LLMResult(text="".join(text_parts), tool_calls=tool_calls,
+                         stop_reason=getattr(choice, "finish_reason", None))
+
+    # ── neutral interface ──────────────────────────────────────────
+    def complete(self, system, messages, tools=None, max_tokens=1024) -> LLMResult:
+        kwargs = dict(model=self.model, max_tokens=max_tokens,
+                      messages=[{"role": "system", "content": system}]
+                      + self._to_openai_messages(messages))
+        oa_tools = self._to_openai_tools(tools)
+        if oa_tools:
+            kwargs["tools"] = oa_tools
+        resp = self.client.chat.completions.create(**kwargs)
+        return self._parse_choice(resp.choices[0])
+
+    def stream_complete(self, system, messages, tools=None, max_tokens=1024) -> Iterator[dict]:
+        """Native streaming lands in Task 5; for now share the emulated fallback."""
+        yield from self._emulated_stream(system, messages, tools, max_tokens=max_tokens)
