@@ -1,6 +1,10 @@
 *.pyc
 __pycache__/
 *.db
+
+# v1→v2 migration & cutover backups (DB dumps + systemd unit copies)
+deploy/backup/
+
 node_modules/
 frontend/node_modules/
 frontend/build/
