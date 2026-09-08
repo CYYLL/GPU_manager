@@ -1,5 +1,6 @@
 """LLM-mode chat API: non-streaming + SSE streaming. Guarded by require_llm_mode."""
 import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -13,6 +14,8 @@ from .mode import require_llm_mode
 from ..agent.llm_client import create_llm_client
 from ..agent.agent_loop import run_agent, run_agent_stream
 from ..agent.tools import TOOLS, ToolExecutor
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["agent"])
 
@@ -73,6 +76,7 @@ def chat(req: ChatRequest,
     except Exception:
         # Never 500: persist a fallback assistant reply so history never ends
         # with consecutive user turns, then surface it to the caller.
+        logger.exception("agent chat: LLM/tool round failed")
         fallback = "模型调用失败，请稍后重试"
         _save(db, current_user.id, "assistant", fallback)
         return {"reply": fallback, "tool_trace": []}
@@ -114,6 +118,7 @@ def chat_stream(req: ChatRequest,
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
             except Exception:
                 # keep role alternation: never leave history ending on a user turn
+                logger.exception("agent stream: LLM/tool round failed")
                 _save(db2, user_id, "assistant", fallback)
                 yield f"data: {fail_event}\n\n".encode("utf-8")
         finally:
