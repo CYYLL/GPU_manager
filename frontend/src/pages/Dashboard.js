@@ -18,13 +18,16 @@ const getMemoryClass = (pct) => {
 const Dashboard = () => {
   const [gpuStatus, setGpuStatus] = useState([]);
   const [userInfo, setUserInfo] = useState(null);
+  const [fetchError, setFetchError] = useState('');
 
   const fetchGpuStatus = useCallback(async () => {
     try {
       const response = await api.get('/api/gpus/status');
       setGpuStatus(response.data);
+      setFetchError('');   // 成功即清除提示（5s 轮询会自动恢复）
     } catch (err) {
       console.error('Error fetching GPU status:', err);
+      setFetchError('GPU 状态获取失败（服务器暂时不可用），将每 5 秒自动重试…');
     }
   }, []);
 
@@ -40,6 +43,11 @@ const Dashboard = () => {
     <div>
       <AppHeader user={userInfo} />
       <div className="content">
+        {fetchError && (
+          <div className="card" style={{ padding: '12px 16px', background: '#fff7e6', border: '1px solid #ffd591' }}>
+            <span style={{ color: '#d46b08', fontSize: 13 }}>{fetchError}</span>
+          </div>
+        )}
         <div className="card" style={{ paddingBottom: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <h2 style={{ margin: 0 }}>GPU Status</h2>

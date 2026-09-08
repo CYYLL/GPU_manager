@@ -3,15 +3,31 @@ import api from '../services/api';
 import AppHeader from '../components/AppHeader';
 
 const UserProfile = () => {
-  const [user, setUser] = useState(null);
+  // 先以 localStorage 里的账号信息渲染（含导航栏），再向服务端刷新用量等实时字段。
+  // 避免 /api/users/me 一次瞬时失败（如 sqlite busy 的 500）就让页面永久停在 loading。
+  const [user, setUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { return null; }
+  });
+  const [fetchError, setFetchError] = useState('');
   const [pwForm, setPwForm] = useState({ old_password: '', new_password: '', confirm: '' });
   const [pwMsg, setPwMsg] = useState('');
   const [resetForm, setResetForm] = useState({ username: '' });
   const [resetMsg, setResetMsg] = useState('');
   const [checkedUser, setCheckedUser] = useState(null);
 
+  const loadProfile = () => {
+    setFetchError('');
+    api.get('/api/users/me')
+      .then((res) => {
+        setUser(res.data);
+        try { localStorage.setItem('user', JSON.stringify(res.data)); } catch (e) { /* ignore */ }
+      })
+      .catch(() => setFetchError('无法加载个人资料（服务器暂时不可用）。已显示本地缓存的资料。'));
+  };
+
   useEffect(() => {
-    api.get('/api/users/me').then(res => setUser(res.data)).catch(console.error);
+    loadProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleChangePassword = async (e) => {
@@ -66,12 +82,34 @@ const UserProfile = () => {
     }
   };
 
-  if (!user) return <div>Loading...</div>;
+  if (!user) {
+    // 无本地缓存且请求失败：给错误页 + 重试，而不是无限 loading。
+    if (fetchError) {
+      return (
+        <div>
+          <div className="content">
+            <div className="card">
+              <h2>Profile</h2>
+              <p style={{ color: '#cf1322' }}>{fetchError}</p>
+              <button className="btn btn-primary" onClick={loadProfile}>Retry / 重试</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return <div>Loading...</div>;
+  }
 
   return (
     <div>
       <AppHeader user={user} />
       <div className="content">
+        {fetchError && (
+          <div className="card" style={{ padding: '12px 16px', background: '#fff7e6', border: '1px solid #ffd591' }}>
+            <span style={{ color: '#d46b08', fontSize: 13 }}>{fetchError}</span>{' '}
+            <button className="btn" style={{ padding: '2px 8px', fontSize: 12 }} onClick={loadProfile}>Retry / 重试</button>
+          </div>
+        )}
         <div className="card">
           <h2>User Profile</h2>
           <table style={{ marginTop: 16 }}>
