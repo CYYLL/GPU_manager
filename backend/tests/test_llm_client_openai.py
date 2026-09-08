@@ -151,3 +151,77 @@ def test_create_llm_client_selects_openai(monkeypatch):
     _mk_openai(monkeypatch)  # no network at construction
     client = create_llm_client()
     assert isinstance(client, OpenAIClient)
+
+
+# ── native streaming ──────────────────────────────────────────────
+
+def _chunk(delta_content=None, delta_tools=None):
+    delta = mock.Mock()
+    delta.content = delta_content
+    delta.tool_calls = delta_tools
+    choice = mock.Mock()
+    choice.delta = delta
+    chunk = mock.Mock()
+    chunk.choices = [choice]
+    return chunk
+
+
+def _tool_delta(index, id_=None, name=None, arguments=None):
+    tc = mock.Mock()
+    tc.index = index
+    tc.id = id_
+    tc.function = mock.Mock()
+    tc.function.name = name
+    tc.function.arguments = arguments
+    return tc
+
+
+def test_stream_native_assembles_text_and_tool_calls(monkeypatch):
+    _set_env(monkeypatch)
+    chunks = iter([
+        _chunk(delta_content="正在查"),
+        _chunk(delta_content="询……"),
+        _chunk(delta_tools=[_tool_delta(0, id_="t1", name="get_", arguments='{"all":')]),
+        _chunk(delta_tools=[_tool_delta(0, name="gpu_status", arguments='true}')]),
+    ])
+    sdk = _mk_openai(monkeypatch, create_retval=chunks)
+    client = OpenAIClient()
+    events = list(client.stream_complete("s", [{"role": "user", "content": "hi"}]))
+    assert {"type": "text", "delta": "正在查"} in events
+    assert {"type": "text", "delta": "询……"} in events
+    tool = [e for e in events if e["type"] == "tool_use"]
+    assert tool == [{"type": "tool_use", "id": "t1",
+                     "name": "get_gpu_status", "input": {"all": True}}]
+    # native stream requested, system message prepended, no tools sent when none
+    called = sdk.chat.completions.create.call_args.kwargs
+    assert called["stream"] is True
+    assert called["messages"][0] == {"role": "system", "content": "s"}
+
+
+def test_stream_native_two_parallel_tool_calls(monkeypatch):
+    _set_env(monkeypatch)
+    chunks = iter([
+        _chunk(delta_tools=[_tool_delta(0, id_="a", name="list_containers", arguments='{}'),
+                            _tool_delta(1, id_="b", name="get_gpu_status",
+                                        arguments='{"x": 2}')]),
+    ])
+    _mk_openai(monkeypatch, create_retval=chunks)
+    events = list(OpenAIClient().stream_complete("s", [{"role": "user", "content": "hi"}]))
+    tools = sorted([e for e in events if e["type"] == "tool_use"],
+                   key=lambda e: e["id"])
+    assert tools == [
+        {"type": "tool_use", "id": "a", "name": "list_containers", "input": {}},
+        {"type": "tool_use", "id": "b", "name": "get_gpu_status", "input": {"x": 2}},
+    ]
+
+
+def test_stream_disabled_uses_emulated_single_chunk(monkeypatch):
+    _set_env(monkeypatch, OPENAI_STREAMING="false")
+    _mk_openai(monkeypatch)
+    client = OpenAIClient()
+    client.complete = mock.Mock(return_value=LLMResult(
+        text="全量回复", tool_calls=[{"id": "a", "name": "x", "input": {}}]))
+    events = list(client.stream_complete("s", [{"role": "user", "content": "hi"}]))
+    assert {"type": "text", "delta": "全量回复"} in events
+    assert {"type": "tool_use", "id": "a", "name": "x", "input": {}} in events
+    assert client.complete.call_count == 1

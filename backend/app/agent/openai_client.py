@@ -137,5 +137,37 @@ class OpenAIClient(BaseLLMClient):
         return self._parse_choice(resp.choices[0])
 
     def stream_complete(self, system, messages, tools=None, max_tokens=1024) -> Iterator[dict]:
-        """Native streaming lands in Task 5; for now share the emulated fallback."""
-        yield from self._emulated_stream(system, messages, tools, max_tokens=max_tokens)
+        if not self.stream_enabled():
+            yield from self._emulated_stream(system, messages, tools, max_tokens=max_tokens)
+            return
+        kwargs = dict(model=self.model, max_tokens=max_tokens, stream=True,
+                      messages=[{"role": "system", "content": system}]
+                      + self._to_openai_messages(messages))
+        oa_tools = self._to_openai_tools(tools)
+        if oa_tools:
+            kwargs["tools"] = oa_tools
+        stream = self.client.chat.completions.create(**kwargs)
+        slots = {}  # tool_call index -> {'id','name','arguments'}
+        for chunk in stream:
+            if not getattr(chunk, "choices", None):
+                continue  # e.g. an empty usage-only chunk
+            delta = chunk.choices[0].delta
+            if getattr(delta, "content", None):
+                yield {"type": "text", "delta": delta.content}
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                slot = slots.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] += fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
+        for slot in slots.values():
+            try:
+                inp = json.loads(slot["arguments"] or "{}")
+            except Exception:
+                inp = {}
+            yield {"type": "tool_use", "id": slot["id"],
+                   "name": slot["name"], "input": inp}
