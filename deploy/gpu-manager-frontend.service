@@ -5,11 +5,15 @@ After=network.target
 [Service]
 Type=simple
 User=amax
-Environment="NVM_DIR=/amax/.nvm"
-# Port 3001: nginx already serves frontend/build on :80 — this unit is an
-# optional convenience for direct :3001 access (v1's crash-looped :3000 unit is
-# not reused). Requires `npm run build` in /amax/gpu_manager_v2/frontend first.
-ExecStart=/bin/bash -c 'source $NVM_DIR/nvm.sh && npx serve -s /amax/gpu_manager_v2/frontend/build -l 3001 --no-clipboard'
+Environment="NVM_DIR=/home/amax/.nvm"
+# OPTIONAL convenience: the production frontend is served by nginx (root →
+# frontend/build) and by the FastAPI build catch-all on :8000 — this unit only
+# adds direct :3001 access. v1's crash-looped :3000 unit (NVM_DIR=/amax/.nvm,
+# absent path + no serve binary) is intentionally NOT reused.
+# `serve` is not pre-installed under nvm 18, so we auto-provision via `npx
+# --yes` (downloads on first start; needs network). Requires `npm run build` in
+# /amax/gpu_manager_v2/frontend first.
+ExecStart=/bin/bash -c 'source $NVM_DIR/nvm.sh && nvm use 18 --silent && exec npx --yes serve -s /amax/gpu_manager_v2/frontend/build -l 3001 --no-clipboard'
 Restart=always
 RestartSec=5
 
