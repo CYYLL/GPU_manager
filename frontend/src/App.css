@@ -167,6 +167,20 @@ tr:hover td { background: #f5f5f5; }
 .mode-toggle button + button { border-left: 1px solid rgba(255,255,255,0.25); }
 .mode-toggle button.active { background: #1677ff; color: #fff; }
 .mode-toggle-compact button { padding: 3px 8px; font-size: 12px; }
+.mode-toggle-error {
+  position: fixed;
+  top: 62px;
+  right: 16px;
+  z-index: 1000;
+  max-width: 360px;
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  color: #cf1322;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
 
 /* ── Agent chat ── */
 .chat-card { display: flex; flex-direction: column; height: calc(100vh - 160px); min-height: 420px; }
