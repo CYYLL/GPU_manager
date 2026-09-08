@@ -6,7 +6,7 @@ import { useMode } from '../context/ModeContext';
 const AppHeader = ({ user }) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { mode } = useMode();
+  const { mode, confirmed } = useMode();
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -23,7 +23,9 @@ const AppHeader = ({ user }) => {
         <h1><a href="/" style={{ color: '#fff', textDecoration: 'none' }}>GPU Resource Manager</a></h1>
         <nav>
           <a href="/dashboard">Dashboard</a>
-          {mode === 'llm' && (
+          {/* Agent 仅对服务端已确认的 LLM 账号显示；传统/未确认时不出现，
+              避免用 localStorage 旧值把 Agent 闪给传统账号（含服务端暂不可达时）。 */}
+          {confirmed && mode === 'llm' && (
             <a href="/chat" style={{ fontWeight: location.pathname.startsWith('/chat') ? 'bold' : 'normal' }}>
               Agent
             </a>

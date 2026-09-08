@@ -7,7 +7,8 @@ import api from '../services/api';
 // 本 Provider 据此直接采用（该值来自另一标签页，而它自己会保持与服务端一致），
 // 无需实时请求、也不会与服务端竞态。
 const ModeContext = createContext({
-  mode: 'llm', setMode: async () => {}, refresh: () => {}, loading: true, modeError: null,
+  mode: 'llm', confirmed: false, setMode: async () => {},
+  refresh: () => {}, loading: true, modeError: null,
 });
 
 export const useMode = () => useContext(ModeContext);
@@ -37,6 +38,7 @@ const SAVE_FAIL_MSG = '⚠ 切换未保存：无法写入服务器，已还原�
 export function ModeProvider({ children }) {
   const [mode, setModeState] = useState(readLocalMode);
   const [loading, setLoading] = useState(true);
+  const [confirmed, setConfirmed] = useState(false);  // 是否已由服务端确认
   const [modeError, setModeError] = useState(null);
   const errTimer = useRef(null);
   // 同步镜像当前 mode，供回滚目标与重复点击判定使用（state 更新是异步的）。
@@ -66,6 +68,7 @@ export function ModeProvider({ children }) {
       const m = norm(res.data?.mode);
       applyMode(m);
       writeLocalMode(m);
+      setConfirmed(true);   // 服务端确认过 → LLM-only 界面(如 Agent)可安全按 mode 显示
     } catch (e) {
       // 401 handled globally (redirect); other errors → keep cached mode.
     } finally {
@@ -97,6 +100,7 @@ export function ModeProvider({ children }) {
     writeLocalMode(next);        // 乐观更新；并让其它标签页经 storage 事件跟随
     try {
       await api.put('/api/mode', { mode: next });
+      setConfirmed(true);   // 切换被服务端接受 → 这就是权威值
       return true;
     } catch (e) {
       // 后端未接受：回滚。仅在用户没有继续切到更新的模式时才回滚，
@@ -113,7 +117,7 @@ export function ModeProvider({ children }) {
   useEffect(() => () => { if (errTimer.current) clearTimeout(errTimer.current); }, []);
 
   return (
-    <ModeContext.Provider value={{ mode, setMode, refresh, loading, modeError }}>
+    <ModeContext.Provider value={{ mode, confirmed, setMode, refresh, loading, modeError }}>
       {children}
     </ModeContext.Provider>
   );

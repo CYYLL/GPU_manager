@@ -8,7 +8,7 @@ import AppHeader from '../components/AppHeader';
 let nextId = 1;
 
 const AgentChat = () => {
-  const { mode, loading: modeLoading } = useMode();
+  const { mode, confirmed, loading: modeLoading } = useMode();
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -127,10 +127,10 @@ const AgentChat = () => {
 
   // 传统模式：不展示 Agent/LLM 说明卡，直接回到主页（/）。顶栏 ModeToggle 可随时切回 LLM 模式后再进入。
   useEffect(() => {
-    if (!modeLoading && mode !== 'llm') navigate('/', { replace: true });
-  }, [mode, modeLoading, navigate]);
+    if (!modeLoading && (mode !== 'llm' || !confirmed)) navigate('/', { replace: true });
+  }, [mode, modeLoading, confirmed, navigate]);
 
-  if (modeLoading || mode !== 'llm') return null; // 解析模式中 / 传统模式 → 定位到主页
+  if (modeLoading || mode !== 'llm' || !confirmed) return null; // 解析/传统/未确认 → 定位主页
 
   return (
     <div>
