@@ -33,6 +33,8 @@ SYSTEM_PROMPT = (
 )
 
 CHAT_HISTORY_LIMIT = 200
+# 单次对话 agent 工具调用轮数上限（ReAct 循环最多执行这么多次工具往返后强制给最终答复）。
+MAX_TOOL_CALLS = 15
 
 
 class ChatRequest(BaseModel):
@@ -76,7 +78,7 @@ def chat(req: ChatRequest,
     executor = ToolExecutor(db, current_user)
     try:
         out = run_agent(llm_client, SYSTEM_PROMPT, messages, TOOLS,
-                        executor.run, max_calls=5)
+                        executor.run, max_calls=MAX_TOOL_CALLS)
         logger.info("agent chat done user=%d reply_len=%d tools=%d",
                     current_user.id, len(out.get("reply", "")),
                     len(out.get("tool_trace", [])))
@@ -127,7 +129,7 @@ def chat_stream(req: ChatRequest,
             executor = ToolExecutor(db2, user)
             try:
                 for ev in run_agent_stream(llm_client, SYSTEM_PROMPT, messages, TOOLS,
-                                           executor.run, max_calls=5):
+                                           executor.run, max_calls=MAX_TOOL_CALLS):
                     if ev["event"] == "done":
                         _save(db2, user_id, "assistant", ev["reply"])
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")
