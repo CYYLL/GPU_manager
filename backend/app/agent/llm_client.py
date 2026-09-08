@@ -138,3 +138,18 @@ class AnthropicClient(BaseLLMClient):
 
 # Back-compat alias: existing imports/tests use LLMClient for the anthropic client.
 LLMClient = AnthropicClient
+
+
+def create_llm_client() -> BaseLLMClient:
+    """Build the client selected by LLM_PROVIDER (default 'anthropic').
+
+    Unknown values fail fast at construction time. The openai module is imported
+    lazily so its dependency is only required when that provider is selected.
+    """
+    provider = os.environ.get("LLM_PROVIDER", "anthropic").strip().lower()
+    if provider == "anthropic":
+        return AnthropicClient()
+    if provider == "openai":
+        from .openai_client import OpenAIClient  # lazy import
+        return OpenAIClient()
+    raise ValueError("LLM_PROVIDER must be 'anthropic' or 'openai', got %r" % provider)

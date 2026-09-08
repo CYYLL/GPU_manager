@@ -277,8 +277,8 @@ def _release_global_lock():
 def _get_llm():
     global llm_client
     if llm_client is None:
-        from .llm_client import LLMClient
-        llm_client = LLMClient()
+        from .llm_client import create_llm_client
+        llm_client = create_llm_client()
     return llm_client
 
 

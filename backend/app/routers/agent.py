@@ -10,13 +10,13 @@ from ..database import get_db, SessionLocal
 from .. import models
 from ..auth import get_current_user
 from .mode import require_llm_mode
-from ..agent.llm_client import LLMClient
+from ..agent.llm_client import create_llm_client
 from ..agent.agent_loop import run_agent, run_agent_stream
 from ..agent.tools import TOOLS, ToolExecutor
 
 router = APIRouter(tags=["agent"])
 
-llm_client = LLMClient()
+llm_client = create_llm_client()
 
 SYSTEM_PROMPT = (
     "你是 GPU Manager 的容器助手。你可以查询用户自己的容器/镜像/GPU/磁盘状态，"

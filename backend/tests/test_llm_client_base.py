@@ -2,7 +2,7 @@
 import pytest
 
 from app.agent.llm_client import (
-    BaseLLMClient, AnthropicClient, LLMClient, LLMResult,
+    BaseLLMClient, AnthropicClient, LLMClient, LLMResult, create_llm_client,
 )
 
 
@@ -23,3 +23,16 @@ def test_stream_disabled_shares_emulated_fallback(monkeypatch):
     c.complete = lambda *a, **k: LLMResult(text="整段", tool_calls=[])
     events = list(c.stream_complete("s", [{"role": "user", "content": "hi"}]))
     assert {"type": "text", "delta": "整段"} in events
+
+
+def test_create_llm_client_defaults_to_anthropic(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    client = create_llm_client()
+    assert isinstance(client, AnthropicClient)
+    assert isinstance(client, LLMClient)
+
+
+def test_create_llm_client_rejects_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    with pytest.raises(ValueError, match="anthropic.*openai"):
+        create_llm_client()
