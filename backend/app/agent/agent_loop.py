@@ -5,7 +5,7 @@ this function is pure orchestration and holds no session.
 
 Run health is logged (INFO per round/tool, WARNING on an empty reply) so a
 model/gateway that returns no text is visible in the service logs instead of
-surfacing only as the generic user-facing fallback string.
+surfacing only as a generic user-facing fallback string.
 """
 import logging
 import time
@@ -15,49 +15,94 @@ from .llm_client import LLMClient, LLMResult
 
 logger = logging.getLogger(__name__)
 
-# User-facing fallback whenever the model returns no text at all. It reads like
-# "tool budget reached", but it is really an *empty-reply* marker; the code logs
-# the real outcome (EMPTY_* below) so the two are never conflated in diagnosis.
-EMPTY_REPLY_FALLBACK = "已达到单次对话工具调用上限"
+# 两类"模型没给文字"必须用不同文案，否则用户分不清"预算耗尽被掐断"和
+# "网关/model 返回了空内容"：
+#   EMPTY_REPLY_FALLBACK    —— 预算未耗尽时某轮既没调工具也没给文字（例如
+#                              上游返回一个 200 的空响应），与调用上限无关。
+#   TOOL_CALL_LIMIT_FALLBACK —— 工具调用轮数真被用完（每轮都在调工具），
+#                              强制收尾轮仍没给出文字，此时"达到上限"属实。
+# 日志始终记录真实原因（下面 EMPTY_*/LIMIT_* 标记），用户文案只是提示。
+EMPTY_REPLY_FALLBACK = "模型未返回有效内容，请重试"
+TOOL_CALL_LIMIT_FALLBACK = "已达到单次对话工具调用上限，请重试或重新描述问题"
+# 用户主动中断（停止/取消）时返回的统一文案：由 cancel_check 触发，区别于
+# 空回复与预算耗尽 —— 请求是被用户中止的，不是模型出问题。
+INTERRUPT_REPLY = "请求中断"
 
 
 def run_agent(llm_client: LLMClient, system: str, messages: List[Dict],
               tools: List[Dict], tool_executor: Callable[[str, Dict], tuple],
-              max_calls: int = 5) -> dict:
+              max_calls: int = 5, cancel_check=None) -> dict:
     """Run the agent loop. tool_executor(name, input) -> (ok, result_text).
 
     Returns {'reply': str, 'tool_trace': [{'tool','ok','result'}, ...]}.
+
+    cancel_check: optional Callable[[], bool]. When it returns True the loop
+    stops before the next external effect (LLM round or tool execution) and
+    returns reply=INTERRUPT_REPLY, so a user "stop" never triggers new work.
     """
     working = list(messages)
     trace: List[Dict] = []
+    # tools 可以是普通 list（原样发，兼容既有调用），或渐进式披露目录
+    # （暴露 round_specs()/activation_text()/__contains__，见 tools.ToolCatalog）。
+    catalog = tools if hasattr(tools, "round_specs") else None
+    active: set = set()  # 本调用内已加载完整 schema 的工具（sticky）
     started = time.monotonic()
     rounds = 0
     for _ in range(max_calls):  # up to max_calls tool rounds
+        if cancel_check is not None and cancel_check():
+            logger.info("agent cancelled by user (before round=%d/%d, tools=%d); "
+                        "reply=INTERRUPT", rounds + 1, max_calls, len(trace))
+            return {"reply": INTERRUPT_REPLY, "tool_trace": trace}
         rounds += 1
-        result: LLMResult = llm_client.complete(system, working, tools)
+        round_tools = catalog.round_specs(active) if catalog is not None else tools
+        result: LLMResult = llm_client.complete(system, working, round_tools)
         logger.info("agent round=%d/%d tool_calls=%d text_len=%d stop=%s",
                     rounds, max_calls, len(result.tool_calls), len(result.text),
                     result.stop_reason)
         if not result.tool_calls:
+            # 非流式下"回复生成"是一次阻塞 complete：若取消在这期间到达，答案虽已
+            # 生成也不应返回 —— 用户已点停止，按中断处理（能立即起效的仍是流式路径）。
+            if cancel_check is not None and cancel_check():
+                logger.info("agent cancelled by user (reply arrived after cancel, "
+                            "rounds=%d); reply=INTERRUPT", rounds)
+                return {"reply": INTERRUPT_REPLY, "tool_trace": trace}
             if not result.text:
+                # 预算未耗尽：模型这一轮既没调工具、也没给文字（如网关空返回）。
                 logger.warning(
                     "agent EMPTY reply at round=%d/%d: model returned no tools "
-                    "and no text (elapsed=%.1fs); user will see fallback",
+                    "and no text (elapsed=%.1fs); user will see EMPTY fallback",
                     rounds, max_calls, time.monotonic() - started)
-            else:
-                logger.info("agent done reply_len=%d tools=%d rounds=%d "
-                            "elapsed=%.1fs",
-                            len(result.text), len(trace), rounds,
-                            time.monotonic() - started)
+                return {"reply": EMPTY_REPLY_FALLBACK, "tool_trace": trace}
+            logger.info("agent done reply_len=%d tools=%d rounds=%d "
+                        "elapsed=%.1fs",
+                        len(result.text), len(trace), rounds,
+                        time.monotonic() - started)
             return {"reply": result.text, "tool_trace": trace}
         for call in result.tool_calls:
-            ok, text = tool_executor(call["name"], call.get("input", {}))
-            trace.append({"tool": call["name"], "ok": ok, "result": text})
+            if cancel_check is not None and cancel_check():
+                logger.info("agent cancelled by user (mid-round tools=%d); "
+                            "reply=INTERRUPT", len(trace))
+                return {"reply": INTERRUPT_REPLY, "tool_trace": trace}
+            name = call["name"]
+            if catalog is not None and name in catalog and name not in active:
+                # 未激活工具首次被调用：不执行、不入 trace。回注完整 schema 并
+                # sticky 激活，下一轮该工具全量声明，让模型用正确参数重发。
+                active.add(name)
+                working.append({"role": "assistant",
+                                "content": [{"type": "tool_use", "id": call["id"],
+                                             "name": name, "input": call.get("input", {})}]})
+                working.append({"role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                             "content": catalog.activation_text(name)}]})
+                logger.info("agent disclosure loaded name=%s", name)
+                continue
+            ok, text = tool_executor(name, call.get("input", {}))
+            trace.append({"tool": name, "ok": ok, "result": text})
             logger.info("agent tool ok=%s name=%s result_len=%d",
-                        ok, call["name"], len(text))
+                        ok, name, len(text))
             working.append({"role": "assistant",
                             "content": [{"type": "tool_use", "id": call["id"],
-                                         "name": call["name"], "input": call.get("input", {})}]})
+                                         "name": name, "input": call.get("input", {})}]})
             working.append({"role": "user",
                             "content": [{"type": "tool_result", "tool_use_id": call["id"],
                                          "content": text}]})
@@ -69,28 +114,54 @@ def run_agent(llm_client: LLMClient, system: str, messages: List[Dict],
                 len(final.tool_calls), len(final.text), final.stop_reason,
                 time.monotonic() - started)
     if not final.text:
+        # 工具轮数已全部用完、强制收尾轮仍没给文字 → 真·达到调用上限。
         logger.warning(
             "agent EMPTY reply after %d tool rounds: forced no-tool final turn "
-            "returned no text (elapsed=%.1fs); user will see fallback",
+            "returned no text (elapsed=%.1fs); user will see LIMIT fallback",
             rounds, time.monotonic() - started)
-    return {"reply": final.text or EMPTY_REPLY_FALLBACK, "tool_trace": trace}
+    return {"reply": final.text or TOOL_CALL_LIMIT_FALLBACK, "tool_trace": trace}
 
 
 def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
                      tools: List[Dict], tool_executor: Callable[[str, Dict], tuple],
-                     max_calls: int = 5):
+                     max_calls: int = 5, cancel_check=None):
     """Streaming agent loop. Yields SSE-style events:
     {"event":"text","delta"} / {"event":"tool_use","tool","input"} /
     {"event":"tool_result","tool","ok","result"} / {"event":"done","reply","tool_trace"}.
+
+    cancel_check: optional Callable[[], bool]. When True the loop stops before
+    the next external effect (LLM round or tool execution) and yields a final
+    {"event":"done","reply":INTERRUPT_REPLY} so the SSE stream ends cleanly and
+    the caller can persist "请求中断".
     """
     working = list(messages)
     trace: List[Dict] = []
+    # 同 run_agent：普通 list 或渐进式披露目录（见 tools.ToolCatalog）。
+    catalog = tools if hasattr(tools, "round_specs") else None
+    active: set = set()
     started = time.monotonic()
     for round_idx in range(max_calls + 1):
-        round_tools = tools if round_idx < max_calls else []  # final round: force plain answer
+        if cancel_check is not None and cancel_check():
+            logger.info("agent stream cancelled by user (before round=%d/%d, "
+                        "tools=%d); reply=INTERRUPT",
+                        round_idx, max_calls + 1, len(trace))
+            yield {"event": "done", "reply": INTERRUPT_REPLY, "tool_trace": trace}
+            return
+        if catalog is not None:
+            round_tools = catalog.round_specs(active) if round_idx < max_calls else []
+        else:
+            round_tools = tools if round_idx < max_calls else []  # final round: force plain answer
         reply_parts: List[str] = []
         tool_calls: List[Dict] = []
         for ev in llm_client.stream_complete(system, working, round_tools):
+            # 回复期间(每个增量间)也轮询取消：模型正在逐字产出回复时点"停止"，
+            # 也要能立刻中止 —— 否则要等整段答完才收到 done，停止形同虚设。
+            # 已发出的增量不可撤销，但后续不再产出，收尾统一回 INTERRUPT_REPLY。
+            if cancel_check is not None and cancel_check():
+                logger.info("agent stream cancelled by user (mid-reply text_chars=%d); "
+                            "reply=INTERRUPT", sum(len(p) for p in reply_parts))
+                yield {"event": "done", "reply": INTERRUPT_REPLY, "tool_trace": trace}
+                return
             if ev["type"] == "text":
                 reply_parts.append(ev["delta"])
                 yield {"event": "text", "delta": ev["delta"]}
@@ -102,11 +173,21 @@ def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
         if not tool_calls:
             reply = "".join(reply_parts)
             if not reply:
-                logger.warning(
-                    "agent stream EMPTY reply at round=%d/%d: no tools and no "
-                    "text (elapsed=%.1fs); user will see fallback",
-                    round_idx, max_calls, time.monotonic() - started)
-                reply = EMPTY_REPLY_FALLBACK
+                if round_idx < max_calls:
+                    # 预算未耗尽就空手而归 → 空回复（如网关空返回），与上限无关。
+                    logger.warning(
+                        "agent stream EMPTY reply at round=%d/%d: no tools and "
+                        "no text (elapsed=%.1fs); user will see EMPTY fallback",
+                        round_idx, max_calls, time.monotonic() - started)
+                    reply = EMPTY_REPLY_FALLBACK
+                else:
+                    # round_idx == max_calls：工具轮数全部用完后的强制收尾轮仍空手。
+                    logger.warning(
+                        "agent stream EMPTY reply after %d tool rounds: forced "
+                        "no-tool final returned no text (elapsed=%.1fs); "
+                        "user will see LIMIT fallback",
+                        max_calls, time.monotonic() - started)
+                    reply = TOOL_CALL_LIMIT_FALLBACK
             else:
                 logger.info("agent stream done rounds=%d tools=%d reply_len=%d "
                             "elapsed=%.1fs",
@@ -115,21 +196,39 @@ def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
             yield {"event": "done", "reply": reply, "tool_trace": trace}
             return
         for call in tool_calls:
-            yield {"event": "tool_use", "tool": call["name"], "input": call.get("input", {})}
-            ok, text = tool_executor(call["name"], call.get("input", {}))
-            trace.append({"tool": call["name"], "ok": ok, "result": text})
+            if cancel_check is not None and cancel_check():
+                logger.info("agent stream cancelled by user (mid-round tools=%d); "
+                            "reply=INTERRUPT", len(trace))
+                yield {"event": "done", "reply": INTERRUPT_REPLY, "tool_trace": trace}
+                return
+            name = call["name"]
+            if catalog is not None and name in catalog and name not in active:
+                # 拦截轮：不产生任何 SSE 事件、不执行 —— 只回注 schema 并 sticky 激活。
+                active.add(name)
+                working.append({"role": "assistant",
+                                "content": [{"type": "tool_use", "id": call["id"],
+                                             "name": name, "input": call.get("input", {})}]})
+                working.append({"role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                             "content": catalog.activation_text(name)}]})
+                logger.info("agent stream disclosure loaded name=%s", name)
+                continue
+            yield {"event": "tool_use", "tool": name, "input": call.get("input", {})}
+            ok, text = tool_executor(name, call.get("input", {}))
+            trace.append({"tool": name, "ok": ok, "result": text})
             logger.info("agent stream tool ok=%s name=%s result_len=%d",
-                        ok, call["name"], len(text))
-            yield {"event": "tool_result", "tool": call["name"], "ok": ok, "result": text}
+                        ok, name, len(text))
+            yield {"event": "tool_result", "tool": name, "ok": ok, "result": text}
             working.append({"role": "assistant",
                             "content": [{"type": "tool_use", "id": call["id"],
-                                         "name": call["name"], "input": call.get("input", {})}]})
+                                         "name": name, "input": call.get("input", {})}]})
             working.append({"role": "user",
                             "content": [{"type": "tool_result", "tool_use_id": call["id"],
                                          "content": text}]})
-    # budget exhausted
+    # 预算耗尽：模型连"无工具"的强制收尾轮都还在调工具 → 真·达到调用上限。
     logger.warning(
         "agent stream EMPTY reply after %d rounds (tool budget exhausted, "
-        "forced final produced nothing; elapsed=%.1fs); user will see fallback",
+        "model kept calling tools on the forced no-tool round; elapsed=%.1fs); "
+        "user will see LIMIT fallback",
         max_calls + 1, time.monotonic() - started)
-    yield {"event": "done", "reply": EMPTY_REPLY_FALLBACK, "tool_trace": trace}
+    yield {"event": "done", "reply": TOOL_CALL_LIMIT_FALLBACK, "tool_trace": trace}

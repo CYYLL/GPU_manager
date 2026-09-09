@@ -90,6 +90,20 @@ class ContainerEvent(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
+class ContainerIdleState(Base):
+    """闲置 GPU 自动停止策略的持久标记：running 容器最后一次采样为"忙碌"之后，
+    首次整组 GPU 空闲的时刻（idle_since）。任一 GPU 恢复忙碌即删除该行；
+    空闲持续超过窗口（默认 8h）由 idle_gpu 后台任务自动停掉容器。
+    行存在即意味着"自 idle_since 起持续空闲"——无 null 语义。"""
+
+    __tablename__ = "container_idle"
+
+    id = Column(Integer, primary_key=True, index=True)
+    container_instance_id = Column(Integer, ForeignKey("container_instances.id"),
+                                   nullable=False, unique=True, index=True)
+    idle_since = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class DiskSnapshot(Base):
     __tablename__ = "disk_snapshots"
 

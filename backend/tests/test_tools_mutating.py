@@ -92,7 +92,76 @@ def test_tools_list_has_mutating_schemas():
     assert by_name["stop_container"]["input_schema"]["required"] == ["id"]
 
 
-def test_create_container_happy_path_returns_password(monkeypatch, db, tmp_path):
+# ── 管理员只允许 stop/delete：create/start/rebuild 一律拒绝 ──────────────────
+
+def _mk_admin(db):
+    u = models.User(username="root", hashed_password="x", role="admin", gpu_quota=8)
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def test_admin_create_container_refused(db):
+    admin = _mk_admin(db)
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("create_container", {})
+    assert ok is False
+    assert "不能创建" in text and "只能停止和删除" in text
+
+
+def test_admin_start_container_refused(db):
+    admin = _mk_admin(db)
+    u = _mk_user(db)
+    inst = _mk_inst(db, u, status="stopped", cid="6" * 64)
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("start_container", {"id": inst.id})
+    assert ok is False and "只能停止和删除" in text
+
+
+def test_admin_rebuild_container_refused(db):
+    admin = _mk_admin(db)
+    u = _mk_user(db)
+    inst = _mk_inst(db, u, status="removed", cid="5" * 64)
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("rebuild_container", {"id": inst.id})
+    assert ok is False and "只能停止和删除" in text
+
+
+def test_admin_stop_user_container_allowed(monkeypatch, db):
+    admin = _mk_admin(db)
+    u = _mk_user(db)
+    inst = _mk_inst(db, u, cid="4" * 64)
+    from app.routers import containers as containers_router
+    stub = mock.Mock()
+    stub.stop_container.return_value = (True, "stopped")
+    stub.is_container_running.return_value = False
+    monkeypatch.setattr(containers_router, "docker_runner", stub)
+
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("stop_container", {"id": inst.id})
+    assert ok is True and "stopped" in text.lower() or "已" in text
+    ev = db.query(models.ContainerEvent).filter(
+        models.ContainerEvent.container_instance_id == inst.id
+    ).order_by(models.ContainerEvent.created_at.desc()).first()
+    assert ev.source == "llm"
+
+
+def test_admin_delete_user_container_allowed(monkeypatch, db):
+    admin = _mk_admin(db)
+    u = _mk_user(db)
+    inst = _mk_inst(db, u, cid="3" * 64)
+    from app.routers import containers as containers_router
+    stub = mock.Mock()
+    stub.remove_container.return_value = (True, "removed")
+    monkeypatch.setattr(containers_router, "docker_runner", stub)
+
+    ex = agent_tools.ToolExecutor(db, admin)
+    ok, text = ex.run("delete_container", {"id": inst.id})
+    assert ok is True
+
+
+def test_create_container_output_does_not_leak_password(monkeypatch, db, tmp_path):
     from app.routers import containers as containers_router
     u = _mk_user(db)
     im = models.GpuImage(name="pytorch:latest", image="docker.io/library/pytorch:latest", min_gpu=1)
@@ -122,8 +191,11 @@ def test_create_container_happy_path_returns_password(monkeypatch, db, tmp_path)
     assert inst is not None
     assert f"id={inst.id}" in text
     assert f"port={inst.assigned_port}" in text
-    assert inst.access_password
-    assert f"password={inst.access_password}" in text
+    assert inst.access_password  # DB 仍保存，用户去容器列表页取
+    # 敏感信息防护：agent 输出/聊天历史里不得出现明文访问密码。
+    assert f"password={inst.access_password}" not in text
+    assert "password=" not in text
+    assert "访问密码" in text and "容器列表" in text  # 引导去列表页复制，不在此展示
     ev = db.query(models.ContainerEvent).filter(
         models.ContainerEvent.container_instance_id == inst.id
     ).order_by(models.ContainerEvent.created_at.desc()).first()

@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import ModeToggle from './ModeToggle';
 import { useMode } from '../context/ModeContext';
 
@@ -20,29 +20,32 @@ const AppHeader = ({ user }) => {
   return (
     <header className="app-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
-        <h1><a href="/" style={{ color: '#fff', textDecoration: 'none' }}>GPU Resource Manager</a></h1>
+        {/* 内部路由一律用 <Link>（client-side）。原生 <a href> 会整页刷新 → ModeProvider
+            重新挂载、confirmed 归 false，Agent 导航项要等 /api/mode 确认后才重新出现，
+            表现为"切页时 Agent 栏消失又冒出"。 */}
+        <h1><Link to="/" style={{ color: '#fff', textDecoration: 'none' }}>GPU Resource Manager</Link></h1>
         <nav>
-          <a href="/dashboard">Dashboard</a>
+          <Link to="/dashboard">Dashboard</Link>
           {/* Agent 仅对服务端已确认的 LLM 账号显示；传统/未确认时不出现，
               避免用 localStorage 旧值把 Agent 闪给传统账号（含服务端暂不可达时）。 */}
           {confirmed && mode === 'llm' && (
-            <a href="/chat" style={{ fontWeight: location.pathname.startsWith('/chat') ? 'bold' : 'normal' }}>
+            <Link to="/chat" style={{ fontWeight: location.pathname.startsWith('/chat') ? 'bold' : 'normal' }}>
               Agent
-            </a>
+            </Link>
           )}
-          {user?.role !== 'admin' && <a href="/containers">Containers</a>}
-          <a href="/profile">Profile</a>
+          {user?.role !== 'admin' && <Link to="/containers">Containers</Link>}
+          <Link to="/profile">Profile</Link>
           {user?.role === 'admin' && (
             <>
-              <a href="/admin/users" style={{ fontWeight: location.pathname.startsWith('/admin/users') ? 'bold' : 'normal' }}>
+              <Link to="/admin/users" style={{ fontWeight: location.pathname.startsWith('/admin/users') ? 'bold' : 'normal' }}>
                 Admin
-              </a>
-              <a href="/admin/cleanup" style={{ fontWeight: location.pathname.startsWith('/admin/cleanup') ? 'bold' : 'normal' }}>
+              </Link>
+              <Link to="/admin/cleanup" style={{ fontWeight: location.pathname.startsWith('/admin/cleanup') ? 'bold' : 'normal' }}>
                 Cleanup
-              </a>
+              </Link>
               {isAdminPage && (
                 <span style={{ fontSize: 13, color: '#aaa' }}>
-                  [ <a href="/admin/users">Users</a> | <a href="/admin/images">Images</a> | <a href="/admin/cleanup">Cleanup</a> ]
+                  [ <Link to="/admin/users">Users</Link> | <Link to="/admin/images">Images</Link> | <Link to="/admin/cleanup">Cleanup</Link> ]
                 </span>
               )}
             </>

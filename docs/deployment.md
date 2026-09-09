@@ -151,7 +151,17 @@ DATABASE_URL=postgresql://user:password@host:5432/gpu_manager
 | `GRACE_DAYS` | `2` | 未使用宽限期：停止的容器空闲超过此天数才入候选 |
 | `CLEANUP_LOCK_FILE` | `/tmp/gpu_manager_v2_cleanup.lock` | 跨进程清理互斥锁文件（`fcntl.flock`），避免多实例并发清理 |
 
-### 3.2 可直接复制的 .env / Copy-paste template
+**⑧ 闲置 GPU 自动停止（v2）**
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `IDLE_GPU_ENABLED` | `true` | 总开关（`0`/`false`/`no` 关） |
+| `IDLE_GPU_INTERVAL_SECONDS` | `1800` | 扫描间隔（秒），约每 30 分钟一轮 |
+| `IDLE_GPU_HOURS` | `8` | 持续空闲（该容器所有卡利用率均 =0 且显存 ≤ 阈值）满此小时数 → 自动停容器 |
+| `IDLE_GPU_MEM_IDLE_PCT` | `5` | 显存占用低于该百分比才视为空闲（与 GPU 看板 free 口径一致） |
+| `IDLE_GPU_DRY_RUN` | `false` | 预演模式：判定到期的容器只计数 `planned`，不停容器、不留事件/通知 |
+
+> 行为要点：只作用于 **running** 容器；多卡容器须 **全部** 卡同周期空闲才算一个 idle tick，任一卡忙碌即清空累计，采样缺失/不可读一律不判定（绝不误停）。满窗口后动作前会做一次 **新鲜 NVML 复检**，已恢复使用则不停止。停止 = docker stop（保留容器）→ 释放 GPU 分配 → 置 stopped → 记 `ContainerEvent(事件=stop, source=agent)` → 向所属用户 Agent 会话插入一条系统通知。`cleanup_protected` **不豁免**。持久标记存于新增表 `container_idle`（服务重启自动 `create_all` 建表，无需迁移）。
 
 在 v2 项目根目录放 `.env`（**不是** backend/ 下）。`DATABASE_URL` 保持注释即用默认 SQLite。
 
@@ -213,6 +223,13 @@ MIN_EFFECTIVE_FREE_GB=5
 WORKSPACE_DOMINANT_PCT=60
 GRACE_DAYS=2
 # CLEANUP_LOCK_FILE=/tmp/gpu_manager_v2_cleanup.lock
+
+# ── Idle-GPU auto-stop ──
+IDLE_GPU_ENABLED=true
+# IDLE_GPU_INTERVAL_SECONDS=1800
+IDLE_GPU_HOURS=8
+IDLE_GPU_MEM_IDLE_PCT=5
+# IDLE_GPU_DRY_RUN=false
 ```
 
 ---
@@ -226,8 +243,9 @@ GRACE_DAYS=2
 │   ├── app/
 │   │   ├── main.py               # 入口：先 load_dotenv(PROJECT_ROOT/.env) 再 import routers
 │   │   ├── database.py           # engine + get_db（DATABASE_URL 默认 sqlite:///./…，按 cwd 解析）
-│   │   ├── models.py             # 9 张表（User/GpuImage/ContainerInstance/GpuAllocation/
-│   │   │                         #   ContainerEvent/DiskSnapshot/CleanupLog/ChatMessage/AdminAlert）
+│   │   ├── models.py             # 10 张表（User/GpuImage/ContainerInstance/GpuAllocation/
+│   │   │                         #   ContainerEvent/ContainerIdleState/DiskSnapshot/CleanupLog/
+│   │   │                         #   ChatMessage/AdminAlert）
 │   │   ├── schemas.py            # Pydantic 模型（UserOut.mode、ContainerResponse.cleanup_protected …）
 │   │   ├── auth.py               # JWT + get_current_user / get_current_admin
 │   │   ├── routers/
@@ -248,7 +266,8 @@ GRACE_DAYS=2
 │   │   │   │                     #   remove/rebuild/set_protection）
 │   │   │   ├── executor.py       # 工具执行器
 │   │   │   ├── monitor.py        # 采样线程：snapshot/retention + 每轮调 cleanup
-│   │   │   └── cleanup.py        # 清理引擎：决策 + 控制循环（锁/限额/冷却/告警）
+│   │   │   ├── cleanup.py        # 清理引擎：决策 + 控制循环（锁/限额/冷却/告警）
+│   │   │   └── idle_gpu.py       # 闲置 GPU 自动停止线程：每轮扫 running 容器，持续空闲满窗口即停（可 env 关闭/dry-run）
 │   │   └── crud/
 │   │       ├── users.py
 │   │       └── containers.py     # 容器/分配/镜像/事件/清理日志 CRUD + mark_container_removed

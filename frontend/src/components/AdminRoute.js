@@ -1,5 +1,5 @@
 import React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Link } from 'react-router-dom';
 
 const AdminRoute = ({ children }) => {
   const token = localStorage.getItem('token');
@@ -24,7 +24,7 @@ const AdminRoute = ({ children }) => {
     <div className="error-page">
       <h2>403 Forbidden</h2>
       <p>Admin access required.</p>
-      <a href="/dashboard">Back to Dashboard</a>
+      <Link to="/dashboard">Back to Dashboard</Link>
     </div>
   );
 };

@@ -120,3 +120,10 @@ def cleanup_stale_containers():
         start_monitor_thread()
     except Exception as e:
         print(f"Monitor thread start warning (non-fatal): {e}")
+
+    # Start idle-GPU auto-stop thread (every ~30 min). Non-fatal.
+    try:
+        from .agent.idle_gpu import start_idle_gpu_thread
+        start_idle_gpu_thread()
+    except Exception as e:
+        print(f"Idle-GPU thread start warning (non-fatal): {e}")

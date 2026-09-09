@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import uuid
 import secrets
 import string
@@ -22,6 +22,46 @@ router = APIRouter(tags=["containers"])
 
 gpu_monitor = get_gpu_monitor()
 docker_runner = DockerRunner()
+
+
+def _gpu_conflict_reason(db: Session, gpu_ids: List[int]) -> Optional[str]:
+    """返回 gpu_ids 里第一张『不可复用』卡的中文原因；全部可复用则 None。
+
+    口径与新建容器自动选卡一致：不可复用 = 该卡已有 DB 活动分配（能定位到占用它的
+    容器/用户/状态）或 NVML 上有活动负载但库里没有登记（外部/未登记进程占用）。
+    restart(stopped→running) 与 rebuild(removed→running) 共用本判定，拒绝消息只在此
+    生成，避免两条路径文案漂移。调用方拿到非 None 就以 400 拒绝启动/重建。
+    """
+    allocated_ids = set(container_crud.get_allocated_gpu_ids(db))
+    holder_of = {}
+    if allocated_ids:
+        rows = db.query(models.GpuAllocation).filter(
+            models.GpuAllocation.gpu_id.in_(sorted(allocated_ids)),
+            models.GpuAllocation.released_at.is_(None),
+        ).all()
+        holder_of = {a.gpu_id: a.container_instance_id for a in rows}
+    raw_statuses = gpu_monitor.get_gpu_status() or []
+    busy_ids = {
+        g["id"] for g in raw_statuses
+        if g["id"] not in allocated_ids and (
+            g.get("memory_utilization", 0) > 5 or g.get("gpu_utilization", 0) > 10
+        )
+    }
+    for gid in gpu_ids:
+        holder_id = holder_of.get(gid)
+        if holder_id is not None:
+            holder = db.query(models.ContainerInstance).filter(
+                models.ContainerInstance.id == holder_id).first()
+            if holder is not None:
+                owner = holder.user.username if holder.user else "?"
+                return (f"GPU {gid} 正被另一个容器占用（container {holder.container_id[:12]}，"
+                        f"用户 {owner}，状态 {holder.status}）。请先停止该容器再启动/重建。")
+            return (f"GPU {gid} 已被另一个容器占用，无法启动/重建。"
+                    f"请先停止占用该卡的容器再重试。")
+        if gid in busy_ids:
+            return (f"GPU {gid} 正被未登记占用者的进程使用（显存/算力有活动负载），"
+                    f"无法启动/重建。请稍后再试，或改用其它空闲卡。")
+    return None
 
 
 @router.get("/api/images", response_model=List[schemas.GpuImageOut])
@@ -285,25 +325,15 @@ def _start_stopped_container_impl(instance_id: int, current_user: models.User, d
                 if not container_crud.restore_container_instance(db, instance):
                     raise HTTPException(
                         status_code=400,
-                        detail="Original GPU(s) are claimed by another active container.",
+                        detail=("该容器在 Docker 里仍在运行，但其记录的 GPU 已被另一台容器占用，"
+                                "无法恢复运行标记。请先停止占用该卡的容器，或删除本记录。"),
                     )
                 return {"message": "Container is already running"}
 
             # Check original GPUs are still available (not allocated and not NVML-busy)
-            allocated_ids = container_crud.get_allocated_gpu_ids(db)
-            raw_statuses = gpu_monitor.get_gpu_status()
-            busy_ids = set(
-                g["id"] for g in raw_statuses
-                if g["id"] not in allocated_ids and (
-                    g.get("memory_utilization", 0) > 5 or g.get("gpu_utilization", 0) > 10
-                )
-            )
-            for gid in instance.gpu_ids:
-                if gid in allocated_ids or gid in busy_ids:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"GPU {gid} is no longer available. Register a new container instead.",
-                    )
+            reason = _gpu_conflict_reason(db, instance.gpu_ids)
+            if reason:
+                raise HTTPException(status_code=400, detail=reason)
 
             # Re-allocate original GPUs
             container_crud.create_allocations(db, instance.gpu_ids, instance.id, current_user.id)
@@ -344,20 +374,9 @@ def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Ses
     allocator = GPUAllocator(total_gpu_count=gpu_monitor.get_gpu_count())
     try:
         with allocator.allocate_guard(timeout=int(os.environ.get("ALLOCATION_TIMEOUT", "60"))):
-            allocated_ids = container_crud.get_allocated_gpu_ids(db)
-            raw_statuses = gpu_monitor.get_gpu_status()
-            busy_ids = set(
-                g["id"] for g in raw_statuses
-                if g["id"] not in allocated_ids and (
-                    g.get("memory_utilization", 0) > 5 or g.get("gpu_utilization", 0) > 10
-                )
-            )
-            for gid in instance.gpu_ids:
-                if gid in allocated_ids or gid in busy_ids:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"GPU {gid} is no longer available. Register a new container instead.",
-                    )
+            reason = _gpu_conflict_reason(db, instance.gpu_ids)
+            if reason:
+                raise HTTPException(status_code=400, detail=reason)
 
             # port: reuse if still free (not held by another container), else reallocate
             used_ports = set()
@@ -368,7 +387,8 @@ def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Ses
                 used_ports.add(p)
             assigned_port = instance.assigned_port
             if assigned_port is None or assigned_port in used_ports:
-                assigned_port = container_crud.allocate_port(db)
+                # exclude_id=本行：低水位自动回收不得误删正在重建的 removed 快照
+                assigned_port = container_crud.allocate_port(db, exclude_id=instance.id)
                 instance.assigned_port = assigned_port
 
             container_name = f"gpu-{current_user.username}-{str(uuid.uuid4())[:8]}"

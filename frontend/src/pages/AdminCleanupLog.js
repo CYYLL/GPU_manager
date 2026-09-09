@@ -85,7 +85,7 @@ const AdminCleanupLog = () => {
             <h3>磁盘与候选（需要 LLM 模式）</h3>
             <p style={{ color: '#888', fontSize: 13 }}>
               <code>/api/monitor/disk</code> 与 <code>/api/monitor/candidates</code> 仅 LLM 模式可读
-              （传统模式 403）。模式开关仅在 GPU Resource Manager 主页可用——
+              。模式开关仅在 GPU Resource Manager 主页可用——
               切到 LLM 模式后再返回本页查看磁盘水位与自动清理候选。
             </p>
           </div>

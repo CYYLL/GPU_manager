@@ -189,7 +189,7 @@ const ContainerManagement = () => {
         <div className="card">
           <h2 style={{ marginBottom: 4 }}>My Containers</h2>
           <p style={{ fontSize: 12, color: '#999', margin: '0 0 16px' }}>
-            removed = 自动清理仅删除容器、保留工作区，可 <b>Rebuild</b> 一键还原启动；
+            removed = 自动清理已删除容器、释放端口，可 <b>Rebuild</b> 一键还原启动（会分配新端口，旧 ssh 端口号失效）；
             保护 = 该容器不会进入自动清理候选。
           </p>
           {containers.length === 0 ? (

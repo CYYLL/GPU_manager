@@ -43,10 +43,12 @@ def test_chat_stop_container_flow(monkeypatch, db):
     docker_stub.is_container_running.return_value = False
     monkeypatch.setattr(containers_router, "docker_runner", docker_stub)
 
-    # scripted LLM: first call asks to stop, second call gives the reply
+    # scripted LLM, progressive disclosure: stub round is intercepted (not executed),
+    # full round actually stops, final round gives the reply.
     llm = mock.Mock()
     llm.complete.side_effect = [
-        LLMResult(tool_calls=[{"id": "t1", "name": "stop_container", "input": {"id": inst.id}}]),
+        LLMResult(tool_calls=[{"id": "t1", "name": "stop_container", "input": {}}]),
+        LLMResult(tool_calls=[{"id": "t2", "name": "stop_container", "input": {"id": inst.id}}]),
         LLMResult(text="好的，容器已停止"),
     ]
     monkeypatch.setattr(agent_router, "llm_client", llm)

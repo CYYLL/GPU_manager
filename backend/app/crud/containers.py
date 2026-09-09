@@ -1,9 +1,12 @@
+import logging
 import os
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
 from .. import models, schemas
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def get_image_by_id(db: Session, image_id: int):
@@ -117,20 +120,67 @@ def create_container_instance(
 
 PORT_RANGE_START = int(os.getenv("PORT_RANGE_START", "22000"))
 PORT_RANGE_END = int(os.getenv("PORT_RANGE_END", "22999"))
+# 剩余空闲端口 ≤ 此值时自动回收最旧的 removed 快照来腾端口；0 = 关闭回收（保持纯 RuntimeError）。
+PORT_RECLAIM_THRESHOLD = int(os.getenv("PORT_RECLAIM_THRESHOLD", "100"))
 
 
-def allocate_port(db: Session) -> int:
-    """Find the first available port in 22000-22999 that is not assigned to any container."""
+def _free_ports(db: Session, exclude_id: Optional[int] = None) -> List[int]:
+    """空闲端口升序列表。
+
+    可排除某个实例 id：rebuild 正在重建的那行既不能算占用它的旧端口，也不能被当作
+    可回收的 removed 快照删除。
+    """
     used_ports = set()
-    results = db.query(models.ContainerInstance.assigned_port).filter(
+    q = db.query(models.ContainerInstance.assigned_port).filter(
         models.ContainerInstance.assigned_port.isnot(None)
-    ).all()
-    for (p,) in results:
+    )
+    if exclude_id is not None:
+        q = q.filter(models.ContainerInstance.id != exclude_id)
+    for (p,) in q.all():
         used_ports.add(p)
-    for port in range(PORT_RANGE_START, PORT_RANGE_END + 1):
-        if port not in used_ports:
-            return port
-    raise RuntimeError(f"No available ports in range {PORT_RANGE_START}-{PORT_RANGE_END}")
+    return [p for p in range(PORT_RANGE_START, PORT_RANGE_END + 1) if p not in used_ports]
+
+
+def allocate_port(db: Session, exclude_id: Optional[int] = None) -> int:
+    """取 22000-22999 中最小未被占用的端口；端口池逼近上限时自动回收最旧的 removed 快照。
+
+    返回顺序分配(最小空闲)。exclude_id 供 rebuild 排除正在重建的那行——既不计其占用，
+    也不把它当作可回收的 removed 快照删除。回收复用 delete_container_instance（整行删除、
+    连 GPU 分配一起清，语义与手动删除一致）；池里没有可回收快照而仍无空闲时抛 RuntimeError。
+    """
+    free = _free_ports(db, exclude_id)
+    if PORT_RECLAIM_THRESHOLD > 0 and len(free) <= PORT_RECLAIM_THRESHOLD:
+        _reclaim_removed_ports(db, exclude_id, target=PORT_RECLAIM_THRESHOLD)
+        free = _free_ports(db, exclude_id)
+    if not free:
+        raise RuntimeError(f"No available ports in range {PORT_RANGE_START}-{PORT_RANGE_END}")
+    return free[0]
+
+
+def _reclaim_removed_ports(db: Session, exclude_id: Optional[int], target: int) -> int:
+    """空闲数 ≤ target 时，按 stopped_at 从旧到新硬删 removed 快照，直到空闲 > target 或无可删。
+
+    返回删除的行数；被回收的快照随之失去一键重建入口（有损，属预期保险行为）。
+    """
+    freed = 0
+    while True:
+        free = _free_ports(db, exclude_id)
+        if len(free) > target:
+            break
+        cand = db.query(models.ContainerInstance).filter(
+            models.ContainerInstance.status == "removed",
+            models.ContainerInstance.assigned_port.isnot(None),
+        )
+        if exclude_id is not None:
+            cand = cand.filter(models.ContainerInstance.id != exclude_id)
+        row = cand.order_by(models.ContainerInstance.stopped_at.asc()).first()
+        if row is None:
+            break
+        logger.warning("port pool low (%d free<=%d): reclaiming removed snapshot id=%s port=%s",
+                       len(free), target, row.id, row.assigned_port)
+        delete_container_instance(db, row.id)  # 整行删除+释放分配，语义与手动删除一致
+        freed += 1
+    return freed
 
 
 def get_container_instance(db: Session, instance_id: int):
@@ -254,7 +304,8 @@ def get_last_used(db: Session, instance_id: int):
 def mark_container_removed(db: Session, instance_id: int, docker_runner,
                            source: str = "agent") -> bool:
     """Force-remove the docker container and mark the DB record `removed`
-    (kept as the config snapshot for one-click rebuild). Releases allocations.
+    (kept as the config snapshot for one-click rebuild, WITHOUT its port).
+    Releases allocations and frees the external port so it re-enters the pool.
 
     Returns False — leaving DB state untouched, allocations intact — when the
     docker removal itself failed. A container that is still alive in docker must
@@ -270,6 +321,7 @@ def mark_container_removed(db: Session, instance_id: int, docker_runner,
     release_allocations_by_container(db, inst.id)
     inst.status = "removed"
     inst.stopped_at = datetime.utcnow()
+    inst.assigned_port = None  # 释放对外端口：removed 快照不再占端口，重建时重新分配
     db.commit()
     db.refresh(inst)
     record_container_event(db, inst.id, inst.user_id, "delete", source,
