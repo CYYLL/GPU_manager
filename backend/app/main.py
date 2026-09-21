@@ -41,11 +41,17 @@ _configure_logging()
 
 from .database import engine, Base
 from .routers import users, gpus, containers, mode, agent, monitor
+from .services.host_ip import get_host_ip
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="GPU Resource Manager", version="2.0.0")
+
+
+@app.get("/api/host-ip")
+def host_ip():
+    return {"host_ip": get_host_ip()}
 
 cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(

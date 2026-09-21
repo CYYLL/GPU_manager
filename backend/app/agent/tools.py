@@ -18,10 +18,18 @@ from ..crud import containers as container_crud
 from ..crud import users as user_crud
 from ..services.docker_runner import DockerRunner
 from ..services.gpu_monitor import get_gpu_monitor
+from ..services.host_ip import get_host_ip
 from ..routers import containers as containers_router
 
 docker_runner = DockerRunner()
 gpu_monitor = get_gpu_monitor()
+
+
+def _access_address(port):
+    if port is None:
+        return ""
+    host_ip = get_host_ip()
+    return f" host_ip={host_ip if host_ip else '未知'} port={port}"
 
 # 空 stub schema：只让模型能"按名发起调用"；真实参数靠拦截后回注完整 schema、
 # 下一轮全量声明来引导 —— 未激活工具的占位调用不会被执行（见 agent_loop 的拦截逻辑）。
@@ -221,7 +229,7 @@ class ToolExecutor:
             running = docker_runner.is_container_running(i.container_id)
             owner = f" user={i.user.username}" if is_admin else ""
             # removed 快照在清理时已释放端口(assigned_port=None)，不再打印 port=None
-            port_txt = "" if i.assigned_port is None else f" port={i.assigned_port}"
+            port_txt = _access_address(i.assigned_port)
             lines.append(
                 f"- id={i.id} cid={i.container_id[:12]} image={i.image} "
                 f"status={i.status} docker_running={running} gpu={i.gpu_ids} "
@@ -239,7 +247,7 @@ class ToolExecutor:
         owner = f" user={inst.user.username}" if self.user.role == "admin" else ""
         return True, (f"id={inst.id} image={inst.image} status={inst.status} "
                       f"docker_running={running} gpu={inst.gpu_ids} "
-                      f"protected={inst.cleanup_protected} "
+                      f"protected={inst.cleanup_protected}{_access_address(inst.assigned_port)} "
                       f"last_used_ts={container_crud.get_last_used(self.db, inst.id)}{owner}")
 
     def _tool_get_gpu_status(self, inp) -> Tuple[bool, str]:
@@ -456,7 +464,8 @@ class ToolExecutor:
             return block
         try:
             resp = containers_router._rebuild_container_impl(int(inp["id"]), self.user, self.db, "llm")
-            return True, (f"容器已重建 id={resp.id} status={resp.status} port={resp.assigned_port}")
+            return True, (f"容器已重建 id={resp.id} status={resp.status}"
+                          f"{_access_address(resp.assigned_port)}")
         except HTTPException as e:
             return False, e.detail
 
@@ -475,7 +484,7 @@ class ToolExecutor:
             resp = containers_router._start_container_impl(req, self.user, self.db, "llm")
             # 访问密码属于敏感信息：不落在 agent 回复/聊天历史/工具回执里，引导去容器列表页查看。
             return True, (f"容器已创建 id={resp.id} image={resp.image} status={resp.status} "
-                          f"port={resp.assigned_port}；访问密码不会在此展示，"
+                          f"{_access_address(resp.assigned_port)}；访问密码不会在此展示，"
                           f"请到『容器列表/详情』页点击复制")
         except HTTPException as e:
             return False, e.detail

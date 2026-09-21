@@ -78,11 +78,21 @@ def test_list_containers_only_own(monkeypatch, db):
     # docker_runner imported at module scope; point it at a stub
     stub = type("DockerStub", (), {"is_container_running": lambda self, cid: True})()
     monkeypatch.setattr(agent_tools, "docker_runner", stub)
+    monkeypatch.setattr(agent_tools, "get_host_ip", lambda: "10.0.0.5")
+    own = db.query(models.ContainerInstance).filter_by(user_id=u.id).first()
+    own.assigned_port = 22013
+    db.commit()
 
     ex = agent_tools.ToolExecutor(db, u)
     ok, text = ex.run("list_containers", {})
     assert ok is True
     assert text.count("a" * 12) >= 1 and text.count("b" * 12) == 0
+    assert "host_ip=10.0.0.5 port=22013" in text
+
+
+def test_access_address_without_ip(monkeypatch):
+    monkeypatch.setattr(agent_tools, "get_host_ip", lambda: None)
+    assert agent_tools._access_address(22013) == " host_ip=未知 port=22013"
 
 
 def test_admin_list_sees_all_users_containers(monkeypatch, db):

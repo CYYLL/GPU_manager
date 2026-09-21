@@ -6,6 +6,7 @@ const ContainerManagement = () => {
   const [containers, setContainers] = useState([]);
   const [images, setImages] = useState([]);
   const [user, setUser] = useState(null);
+  const [hostIp, setHostIp] = useState(null);
   const [form, setForm] = useState({
     image_id: '',
     gpu_count: 1,
@@ -27,6 +28,7 @@ const ContainerManagement = () => {
   useEffect(() => {
     fetchContainers();
     fetchImages();
+    api.get('/api/host-ip').then(res => setHostIp(res.data.host_ip)).catch(() => {});
     const userStr = localStorage.getItem('user');
     if (userStr) setUser(JSON.parse(userStr));
     const interval = setInterval(fetchContainers, 5000);
@@ -200,7 +202,7 @@ const ContainerManagement = () => {
                 <tr>
                   <th>ID</th>
                   <th>Image</th>
-                  <th>Port</th>
+                  <th>服务器地址</th>
                   <th>GPUs</th>
                   <th>CPU</th>
                   <th>Memory</th>
@@ -215,7 +217,9 @@ const ContainerManagement = () => {
                   <tr key={c.id}>
                     <td style={{ fontFamily: 'monospace' }}>{c.container_id}</td>
                     <td>{c.image}</td>
-                    <td>{c.assigned_port || '-'}</td>
+                    <td style={{ fontFamily: 'monospace' }}>
+                      {c.assigned_port ? `${hostIp || window.location.hostname}:${c.assigned_port}` : '-'}
+                    </td>
                     <td>{c.gpu_count} (IDs: {c.gpu_ids?.join(',')})</td>
                     <td>{c.cpu_limit ? `${c.cpu_limit} cores` : 'Unlimited'}</td>
                     <td>{c.memory_limit ? `${c.memory_limit} MB` : 'Unlimited'}</td>

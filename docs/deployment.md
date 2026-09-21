@@ -491,6 +491,21 @@ sudo journalctl -u gpu-manager-backend -n 50 --no-pager
 ### 7.7 前端切换 mode 后没生效
 前端 ModeContext 每次登录都 `refresh()` 拉服务端 `/api/mode`（权威）；改 `MODE_DEFAULT` 只影响**新注册**用户，存量用户用页面切换或 `PUT /api/mode`。
 
+### 7.8 后端重启
+```bash
+sudo systemctl restart gpu-manager-backend
+```
+
+### 7.9 前端重启
+
+如需重启可选的前端静态服务（直接访问 `:3001` 时使用），构建后执行：
+
+```bash
+sudo systemctl restart gpu-manager-frontend
+```
+
+生产环境通过 nginx 访问时，更新前端只需重新执行 `npm run build` 并刷新浏览器；nginx 直接读取 `frontend/build`，无需重启前端服务。
+
 ---
 
 > 如有其他问题，请联系管理员。
