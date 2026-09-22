@@ -38,5 +38,8 @@ frontend/build/
 # SDD scratch (briefs/reports/ledger)
 .superpowers/
 
+# Superpowers documents (plans and specs)
+docs/superpowers/
+
 # Local Claude Code config
 .claude/
