@@ -47,24 +47,12 @@
 
 以下用于全新服务器；已安装的组件直接跳过其安装步骤。GPU 驱动需按显卡和系统版本选择，请先按 [NVIDIA 驱动说明](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/ubuntu.html)安装，并执行 `nvidia-smi` 确认正常。
 
-**1. 安装基础包和 Docker Engine。** 下列 Docker 命令适用于 [官方支持的 Ubuntu 版本](https://docs.docker.com/engine/install/ubuntu/)；现有 Docker 安装应先按该文档检查包冲突。
+**1. 安装基础包和 Docker。** 全新 Ubuntu 服务器可使用 [Ubuntu 提供的 `docker.io` 包](https://ubuntu.com/server/docs/how-to/containers/docker-for-system-admins/)；如需 Docker CE，改按 [Docker 官方安装说明](https://docs.docker.com/engine/install/ubuntu/)操作，不混用两种软件源。
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg python3 python3-venv python3-pip nginx git
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
-Components: stable
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo apt-get install -y python3 python3-venv python3-pip nginx curl gnupg git docker.io
+sudo systemctl enable --now docker nginx
 ```
 
 **2. 安装 NVIDIA Container Toolkit 并配置 Docker。** 这一步要求 GPU 驱动和 Docker 已安装；命令来源见 [NVIDIA 安装说明](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)。
@@ -83,10 +71,7 @@ sudo systemctl restart docker
 ```bash
 DEPLOY_USER=amax
 id "$DEPLOY_USER" || sudo useradd -m -s /bin/bash "$DEPLOY_USER"
-sudo systemctl enable --now docker nginx
 nvidia-smi
-docker --version
-nvidia-ctk --version
 sudo usermod -aG docker "$DEPLOY_USER"
 sudo -u "$DEPLOY_USER" docker info >/dev/null
 ```

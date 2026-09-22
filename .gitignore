@@ -1,8 +1,26 @@
 *.pyc
 __pycache__/
 *.db
+*.db-journal
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite-shm
+*.sqlite-wal
+*.sql
+*.dump
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*.bak
+.ssh/
+gpu-*/
 
 # v1→v2 migration & cutover backups (DB dumps + systemd unit copies)
 deploy/backup/
@@ -14,6 +32,7 @@ frontend/build/
 # Local environment (real secrets live in untracked .env; template = .env.example)
 .env
 .env.*
+.envrc
 !.env.example
 
 # SDD scratch (briefs/reports/ledger)

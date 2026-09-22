@@ -131,7 +131,7 @@ def test_list_containers_only_own(monkeypatch, db):
     # docker_runner imported at module scope; point it at a stub
     stub = type("DockerStub", (), {"is_container_running": lambda self, cid: True})()
     monkeypatch.setattr(agent_tools, "docker_runner", stub)
-    monkeypatch.setattr(agent_tools, "get_host_ip", lambda: "10.0.0.5")
+    monkeypatch.setattr(agent_tools, "get_host_ip", lambda: "host.example")
     own = db.query(models.ContainerInstance).filter_by(user_id=u.id).first()
     own.assigned_port = 22013
     db.commit()
@@ -140,7 +140,7 @@ def test_list_containers_only_own(monkeypatch, db):
     ok, text = ex.run("list_containers", {})
     assert ok is True
     assert text.count("a" * 12) >= 1 and text.count("b" * 12) == 0
-    assert "host_ip=10.0.0.5 port=22013" in text
+    assert "host_ip=host.example port=22013" in text
 
 
 def test_access_address_without_ip(monkeypatch):
