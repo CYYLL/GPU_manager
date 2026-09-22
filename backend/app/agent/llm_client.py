@@ -1,8 +1,10 @@
 """Configurable LLM clients behind one abstraction (Anthropic default, OpenAI optional).
 
 Provider chosen by LLM_PROVIDER:
-  - anthropic (default) -> AnthropicClient (back-compat alias LLMClient): env LLM_*/ANTHROPIC_*
-  - openai            -> OpenAIClient (openai_client.py): env OPENAI_*
+  - anthropic (default) -> AnthropicClient (back-compat alias LLMClient)
+  - openai            -> OpenAIClient (openai_client.py)
+Both use LLM_API_KEY, LLM_BASE_URL and LLM_MODEL first; provider-specific names remain
+fallbacks. The configured values must belong to the selected provider.
 Env precedence (anthropic path): LLM_BASE_URL/LLM_API_KEY/LLM_MODEL override ANTHROPIC_*.
 BaseLLMClient owns the shared params (api_key/base_url/model/streaming/timeout/
 max_retries) and the common emulated-stream fallback; each subclass implements

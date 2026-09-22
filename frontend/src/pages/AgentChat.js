@@ -1,3 +1,4 @@
+import { apiErrorText } from '../services/errorMessages';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../services/api';
 import { streamChat } from '../services/agentStream';
@@ -10,6 +11,19 @@ let nextId = 1;
 let leftWhileRunning = false;
 
 const LEFTOVER_POLL_MS = 1500;
+const toolLabels = {
+  list_containers: '查询容器', get_container_status: '查询容器状态',
+  get_gpu_status: '查询 GPU 状态', get_disk_status: '查询磁盘状态',
+  list_images: '查询镜像预设', set_image_preset: '更新镜像预设',
+  list_local_images: '查询本地镜像', inspect_image: '分析镜像',
+  search_hub_images: '搜索镜像', pull_hub_image: '拉取镜像',
+  delete_local_image: '删除镜像', set_container_protection: '设置容器保护',
+  check_gpu_quota: '查询 GPU 配额', set_user_quota: '设置用户配额',
+  list_users: '查询用户', delete_user: '删除用户',
+  create_container: '创建容器', repair_container_ssh: '修复 SSH 登录',
+  start_container: '启动容器', stop_container: '停止容器',
+  delete_container: '删除容器', rebuild_container: '重建容器',
+};
 
 function ToolChip({ c }) {
   return (
@@ -17,7 +31,7 @@ function ToolChip({ c }) {
       <span className="tool-chip-icon">
         {c.status === 'running' ? '⋯' : c.status === 'ok' ? '✓' : '✗'}
       </span>
-      <span className="tool-chip-name">{c.tool}</span>
+      <span className="tool-chip-name">{toolLabels[c.tool] || '工具调用'}</span>
       <span>{c.status === 'running' ? '执行中' : c.status === 'ok' ? '成功' : '失败'}</span>
     </div>
   );
@@ -68,7 +82,7 @@ const AgentChat = () => {
       }));
       setMessages(rows);
     } catch (err) {
-      setError(err.response?.data?.detail || '加载会话失败');
+      setError(apiErrorText(err, '加载会话失败'));
     }
   }, []);
 
@@ -174,7 +188,7 @@ const AgentChat = () => {
           chips: settleRunningChips(a.chips), streaming: false }));
       },
       onError: (err) => {
-        setError(err.message || String(err));
+        setError(apiErrorText(err, '请求失败，请稍后重试'));
         patchLastAssistant((a) => ({ ...a, chips: settleRunningChips(a.chips), streaming: false }));
       },
       onClose: () => {
@@ -198,7 +212,7 @@ const AgentChat = () => {
       await api.post('/api/agent/cancel');
       // 不在此改 sending：等后端 done("请求中断") → onClose 统一收尾。
     } catch (err) {
-      setError(err.response?.data?.detail || '停止请求发送失败，可重试');
+      setError(apiErrorText(err, '停止请求发送失败，可重试'));
       setCancelling(false); // 允许再次点击停止
     }
   };
@@ -209,7 +223,7 @@ const AgentChat = () => {
       await api.delete('/api/agent/session');
       setMessages([]);
     } catch (err) {
-      setError(err.response?.data?.detail || '清空失败');
+      setError(apiErrorText(err, '清空失败'));
     }
   };
 
@@ -226,14 +240,14 @@ const AgentChat = () => {
       <div className="content">
           <div className="card chat-card">
             <div className="chat-head">
-              <h2 style={{ margin: 0 }}>Agent 助手</h2>
+              <h2 style={{ margin: 0 }}>智能助手</h2>
               <button className="btn btn-secondary" onClick={handleClear}
                 disabled={sending || leftover || messages.length === 0}>
                 清空会话
               </button>
             </div>
             <p style={{ fontSize: 12, color: '#aaa', marginTop: 4 }}>
-              中：我能查询/创建/启动/停止/删除/重建你的容器，设置清理保护。管理员还可以搜索和拉取 Docker Hub 镜像。删除容器会销毁容器本体（工作区保留）。
+              我可以查询、创建、启动、停止、删除和重建你的容器，也能设置清理保护。管理员还可以搜索和拉取 Docker Hub 镜像。删除容器会销毁容器本体，工作区仍会保留。
             </p>
 
             <div className="chat-list" ref={listRef}>

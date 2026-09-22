@@ -95,6 +95,7 @@ def test_rebuild_recreates_from_snapshot(monkeypatch, db):
 
     dr = mock.Mock()
     dr.is_container_running.return_value = False
+    dr.get_running_gpu_claims.return_value = {}
     dr.start_container.return_value = ("d" * 64, "running", "root")
     monkeypatch.setattr(containers_router, "docker_runner", dr)
     # GPU monitor idle + allocator
@@ -139,6 +140,7 @@ def test_rebuild_allocates_fresh_port_when_snapshot_freed(monkeypatch, db):
 
     dr = mock.Mock()
     dr.is_container_running.return_value = False
+    dr.get_running_gpu_claims.return_value = {}
     dr.start_container.return_value = ("d" * 64, "running", "root")
     monkeypatch.setattr(containers_router, "docker_runner", dr)
     gpu_mock = mock.Mock()

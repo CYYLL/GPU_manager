@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Login from './pages/Login';
 import Home from './pages/Home';
+import Guide from './pages/Guide';
 import Dashboard from './pages/Dashboard';
 import ContainerManagement from './pages/ContainerManagement';
 import UserProfile from './pages/UserProfile';
@@ -24,6 +25,9 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/" element={
             <ProtectedRoute><Home /></ProtectedRoute>
+          } />
+          <Route path="/guide" element={
+            <ProtectedRoute><Guide /></ProtectedRoute>
           } />
           <Route path="/dashboard" element={
             <ProtectedRoute><Dashboard /></ProtectedRoute>

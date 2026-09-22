@@ -1,4 +1,6 @@
 from app.services.ssh_access import configure_ssh_login
+from app.services import docker_runner as runner_module
+from unittest import mock
 
 
 class Container:
@@ -49,3 +51,24 @@ def test_password_auth_disabled_rejects():
     ok, username, _ = configure_ssh_login(container, "secret")
     assert not ok and username is None
     assert not any(cmd[0] in ("useradd", "usermod") for cmd in container.commands)
+
+
+def test_setup_ssh_rejects_successful_service_command_without_listening_port(monkeypatch):
+    container = mock.Mock()
+    container.id = "a" * 64
+    container.exec_run.return_value = (0, b"")
+    container.attrs = {"NetworkSettings": {"Ports": {"22/tcp": [
+        {"HostIp": "0.0.0.0", "HostPort": "22000"}
+    ]}}}
+    runner = runner_module.DockerRunner.__new__(runner_module.DockerRunner)
+    runner.client = mock.Mock()
+    runner.client.containers.get.return_value = container
+    monkeypatch.setattr(runner_module, "configure_ssh_login",
+                        lambda *_: (True, "root", "SSH 登录已就绪"))
+    monkeypatch.setattr(runner_module, "ssh_banner_ready", lambda port: False)
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _: None)
+
+    ok, username, reason = runner.setup_ssh(container.id, "secret")
+
+    assert not ok and username is None
+    assert "未在映射端口就绪" in reason

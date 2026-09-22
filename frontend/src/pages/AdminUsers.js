@@ -1,3 +1,4 @@
+import { apiErrorText } from '../services/errorMessages';
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import AppHeader from '../components/AppHeader';
@@ -36,44 +37,44 @@ const AdminUsers = () => {
   const handleQuotaChange = async (userId, newQuota) => {
     try {
       await api.put(`/api/admin/users/${userId}/quota`, { gpu_quota: parseInt(newQuota) });
-      alert('Quota updated');
+      alert('GPU 配额已更新');
       fetchUsers();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error updating quota');
+      alert(apiErrorText(err, '更新 GPU 配额失败'));
     }
   };
 
   const handleDelete = async (userId, username) => {
-    if (!window.confirm(`Delete user "${username}"? This will release all their GPU allocations and remove their container records.`)) {
+    if (!window.confirm(`确定删除用户“${username}”吗？这会释放其 GPU 分配并删除容器记录。`)) {
       return;
     }
     try {
       await api.delete(`/api/admin/users/${userId}`);
-      alert('User deleted');
+      alert('用户已删除');
       fetchUsers();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error deleting user');
+      alert(apiErrorText(err, '删除用户失败'));
     }
   };
 
   const handleContainerStop = async (instanceId) => {
     try {
       await api.delete(`/api/containers/${instanceId}`);
-      alert('Container stopped');
+      alert('容器已停止');
       fetchContainers();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error stopping container');
+      alert(apiErrorText(err, '停止容器失败'));
     }
   };
 
   const handleContainerDelete = async (instanceId) => {
-    if (!window.confirm('Delete this container? This cannot be undone.')) return;
+    if (!window.confirm('确定删除该容器吗？此操作无法撤销。')) return;
     try {
       await api.delete(`/api/containers/${instanceId}/remove`);
-      alert('Container deleted');
+      alert('容器已删除');
       fetchContainers();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Error deleting container');
+      alert(apiErrorText(err, '删除容器失败'));
     }
   };
 
@@ -84,26 +85,29 @@ const AdminUsers = () => {
   const getContainersForUser = (userId) => {
     return containers.filter(c => c.user_id === userId);
   };
+  const statusLabel = {
+    running: '运行中', stopped: '已停止', removed: '已移除', error: '异常',
+  };
 
   return (
     <div>
       <AppHeader user={user} />
       <div className="content">
         <div className="card">
-          <h2>User Management</h2>
+          <h2>用户管理</h2>
           {users.length === 0 ? (
-            <p style={{ marginTop: 16, color: '#888' }}>No users found.</p>
+            <p style={{ marginTop: 16, color: '#888' }}>暂无用户。</p>
           ) : (
             <table style={{ marginTop: 16, width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
                   <th style={{ width: 40 }}></th>
-                  <th>ID</th>
-                  <th>Username</th>
-                  <th>GPU Quota</th>
-                  <th>GPU Used</th>
-                  <th>Containers</th>
-                  <th>Action</th>
+                  <th>编号</th>
+                  <th>用户名</th>
+                  <th>GPU 配额</th>
+                  <th>已用 GPU</th>
+                  <th>容器数</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -135,12 +139,12 @@ const AdminUsers = () => {
                               const input = document.getElementById(`quota-${u.id}`);
                               handleQuotaChange(u.id, input.value);
                             }}>
-                            Set
+                            保存配额
                           </button>
                           <button className="btn btn-danger"
                             style={{ marginLeft: 8 }}
                             onClick={() => handleDelete(u.id, u.username)}>
-                            Delete
+                            删除
                           </button>
                         </td>
                       </tr>
@@ -149,19 +153,19 @@ const AdminUsers = () => {
                           <td colSpan={7} style={{ padding: 0 }}>
                             <div style={{ padding: '8px 16px 16px 40px', background: '#fafafa' }}>
                               {userContainers.length === 0 ? (
-                                <p style={{ color: '#888', margin: 8 }}>No containers for this user.</p>
+                                <p style={{ color: '#888', margin: 8 }}>该用户暂无容器。</p>
                               ) : (
                                 <table style={{ width: '100%', fontSize: 13 }}>
                                   <thead>
                                     <tr>
-                                      <th>Container ID</th>
-                                      <th>Image</th>
-                                      <th>Port</th>
+                                      <th>容器编号</th>
+                                      <th>镜像</th>
+                                      <th>端口</th>
                                       <th>SSH 用户</th>
-                                      <th>GPUs</th>
-                                      <th>Password</th>
-                                      <th>Status</th>
-                                      <th>Action</th>
+                                      <th>GPU</th>
+                                      <th>密码</th>
+                                      <th>状态</th>
+                                      <th>操作</th>
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -171,7 +175,7 @@ const AdminUsers = () => {
                                         <td>{c.image}</td>
                                         <td>{c.assigned_port || '-'}</td>
                                         <td>{c.ssh_username || '未确认'}</td>
-                                        <td>{c.gpu_count} (IDs: {c.gpu_ids?.join(',')})</td>
+                                        <td>{c.gpu_count} 张（编号：{c.gpu_ids?.join(',')}）</td>
                                         <td>
                                           {c.access_password ? (
                                             <span style={{ cursor: 'pointer', fontFamily: 'monospace', fontSize: 13 }}
@@ -184,9 +188,9 @@ const AdminUsers = () => {
                                                 el.select();
                                                 document.execCommand('copy');
                                                 document.body.removeChild(el);
-                                                alert('Password copied!');
+                                                alert('密码已复制');
                                               }}
-                                              title="Click to copy password">
+                                              title="点击复制密码">
                                               {'●'.repeat(8)}
                                             </span>
                                           ) : '-'}
@@ -194,7 +198,7 @@ const AdminUsers = () => {
                                         <td>
                                           <span className="status-badge"
                                             style={{ background: c.status === 'running' ? '#52c41a' : '#888' }}>
-                                            {c.status}
+                                            {statusLabel[c.status] || '未知'}
                                           </span>
                                         </td>
                                         <td>
@@ -202,13 +206,13 @@ const AdminUsers = () => {
                                             <button className="btn btn-danger"
                                               onClick={() => handleContainerStop(c.id)}
                                               style={{ marginRight: 4, fontSize: 12, padding: '2px 8px' }}>
-                                              Stop
+                                              停止
                                             </button>
                                           )}
                                           <button className="btn btn-secondary"
                                             onClick={() => handleContainerDelete(c.id)}
                                             style={{ fontSize: 12, padding: '2px 8px' }}>
-                                            Delete
+                                            删除
                                           </button>
                                         </td>
                                       </tr>

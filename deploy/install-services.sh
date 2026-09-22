@@ -57,7 +57,7 @@ install_v2_now() {
   cp "$SCRIPT_DIR/gpu-manager-backend.service" /etc/systemd/system/
   cp "$SCRIPT_DIR/gpu-manager-frontend.service" /etc/systemd/system/
   systemctl daemon-reload
-  systemctl enable gpu-manager-backend && systemctl start gpu-manager-backend
+  systemctl enable gpu-manager-backend && systemctl restart gpu-manager-backend
   echo "    backend: $(systemctl is-active gpu-manager-backend)"
   systemctl enable gpu-manager-frontend && systemctl start gpu-manager-frontend
   echo "    frontend: $(systemctl is-active gpu-manager-frontend)"

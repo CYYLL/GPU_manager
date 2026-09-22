@@ -27,15 +27,23 @@ gpu_monitor = get_gpu_monitor()
 docker_runner = DockerRunner()
 
 
+def _docker_gpu_claims(total_gpu_count: int):
+    try:
+        return docker_runner.get_running_gpu_claims(total_gpu_count)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 def _gpu_conflict_reason(db: Session, gpu_ids: List[int]) -> Optional[str]:
     """返回 gpu_ids 里第一张『不可复用』卡的中文原因；全部可复用则 None。
 
-    口径与新建容器自动选卡一致：不可复用 = 该卡已有 DB 活动分配（能定位到占用它的
-    容器/用户/状态）或 NVML 上有活动负载但库里没有登记（外部/未登记进程占用）。
+    口径与新建容器自动选卡一致：不可复用 = DB 活动分配、运行中的 Docker
+    容器 GPU 请求，或 NVML 上有未登记的活动负载。
     restart(stopped→running) 与 rebuild(removed→running) 共用本判定，拒绝消息只在此
     生成，避免两条路径文案漂移。调用方拿到非 None 就以 400 拒绝启动/重建。
     """
     allocated_ids = set(container_crud.get_allocated_gpu_ids(db))
+    docker_claims = _docker_gpu_claims(gpu_monitor.get_gpu_count())
     holder_of = {}
     if allocated_ids:
         rows = db.query(models.GpuAllocation).filter(
@@ -61,6 +69,11 @@ def _gpu_conflict_reason(db: Session, gpu_ids: List[int]) -> Optional[str]:
                         f"用户 {owner}，状态 {holder.status}）。请先停止该容器再启动/重建。")
             return (f"GPU {gid} 已被另一个容器占用，无法启动/重建。"
                     f"请先停止占用该卡的容器再重试。")
+        if docker_claims.get(gid):
+            holder = docker_claims[gid][0]
+            return (f"GPU {gid} 已被运行中的 Docker 容器 "
+                    f"{holder['name']} ({holder['container_id'][:12]}) 预留，"
+                    "请先处理该容器的 GPU 占用。")
         if gid in busy_ids:
             return (f"GPU {gid} 正被未登记占用者的进程使用（显存/算力有活动负载），"
                     f"无法启动/重建。请稍后再试，或改用其它空闲卡。")
@@ -169,11 +182,14 @@ def _start_container_impl(req: schemas.ContainerStartRequest, current_user: mode
                     g.get("memory_utilization", 0) > 5 or g.get("gpu_utilization", 0) > 10
                 )
             ]
-            available = allocator.find_available_gpus(db, req.gpu_count, busy_gpu_ids=busy_ids)
+            docker_claims = _docker_gpu_claims(allocator.total_gpu_count)
+            available = allocator.find_available_gpus(
+                db, req.gpu_count, busy_gpu_ids=list(set(busy_ids) | set(docker_claims)))
             if len(available) < req.gpu_count:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Not enough GPUs. Requested: {req.gpu_count}, Available: {len(available)}",
+                    detail=(f"GPU 不足：请求 {req.gpu_count} 张，可用 {len(available)} 张。"
+                            f"Docker 容器预留的 GPU：{sorted(docker_claims)}"),
                 )
 
             gpu_ids = available[:req.gpu_count]
@@ -370,6 +386,12 @@ def _start_stopped_container_impl(instance_id: int, current_user: models.User, d
             if docker_state is None:
                 raise HTTPException(status_code=503, detail="无法确认 Docker 容器状态，请稍后重试")
             if docker_state:
+                if instance.access_password:
+                    ssh_ok, ssh_username, ssh_reason = docker_runner.ensure_ssh(
+                        instance.container_id, instance.access_password, instance.ssh_username)
+                    if not ssh_ok:
+                        raise HTTPException(status_code=503, detail=f"容器 SSH 恢复失败：{ssh_reason}")
+                    instance.ssh_username = ssh_username
                 if not container_crud.restore_container_instance(db, instance):
                     raise HTTPException(
                         status_code=400,

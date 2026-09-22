@@ -75,6 +75,19 @@ def test_catalog_never_admits_unknown_tools_even_from_active():
     assert "run_shell" not in agent_tools.CATALOG
 
 
+def test_catalog_prefetches_common_tools_without_exposing_admin_tools():
+    active = agent_tools.USER_CATALOG.initial_active("查看 GPU 状态")
+    assert active == {"get_gpu_status"}
+    specs = {spec["name"]: spec for spec in agent_tools.USER_CATALOG.round_specs(active)}
+    assert specs["get_gpu_status"] == next(
+        spec for spec in agent_tools.TOOLS if spec["name"] == "get_gpu_status")
+    assert specs["create_container"]["input_schema"] == {"type": "object", "properties": {}}
+    assert "delete_user" not in specs
+    assert agent_tools.USER_CATALOG.initial_active("创建容器，GPU 2 张") >= {
+        "list_local_images", "list_images", "check_gpu_quota", "create_container"}
+    assert "start_container" not in agent_tools.USER_CATALOG.initial_active("为什么容器无法启动？")
+
+
 def test_run_agent_refuses_llm_emitted_unknown_tool(db):
     u = _mk_user(db)
     ex = agent_tools.ToolExecutor(db, u)

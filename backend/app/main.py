@@ -139,3 +139,15 @@ def cleanup_stale_containers():
         start_idle_gpu_thread()
     except Exception as e:
         print(f"Idle-GPU thread start warning (non-fatal): {e}")
+
+    try:
+        from .agent.ssh_watchdog import start_ssh_watchdog_thread
+        start_ssh_watchdog_thread()
+    except Exception as e:
+        print(f"SSH watchdog start warning (non-fatal): {e}")
+
+    try:
+        from .agent.gpu_conflict_monitor import start_gpu_conflict_thread
+        start_gpu_conflict_thread()
+    except Exception as e:
+        print(f"GPU conflict monitor start warning (non-fatal): {e}")

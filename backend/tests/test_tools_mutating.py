@@ -274,6 +274,7 @@ def test_create_container_output_does_not_leak_password(monkeypatch, db, tmp_pat
     # docker_runner.start_container returns a fake docker id + running status
     stub = mock.Mock()
     stub.start_container.return_value = ("d" * 64, "running", "root")
+    stub.get_running_gpu_claims.return_value = {}
     monkeypatch.setattr(containers_router, "docker_runner", stub)
     # idle GPUs: availability + busy-GPU checks pass for a single GPU
     monkeypatch.setattr(containers_router.gpu_monitor, "get_gpu_count", lambda: 1)

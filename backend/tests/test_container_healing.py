@@ -165,3 +165,39 @@ def test_start_stopped_heals_when_docker_already_running(db, test_user, docker_m
     db.refresh(inst)
     assert inst.status == "running"
     assert len(_active_alloc(db, inst.id)) == 1
+
+
+def test_start_stopped_repairs_ssh_before_healing_running_docker(
+    db, test_user, docker_mock, gpu_mock
+):
+    inst = _make_instance(db, test_user.id, status="stopped")
+    inst.access_password = "secret"
+    inst.ssh_username = "root"
+    db.commit()
+    docker_mock.is_container_running.return_value = True
+    docker_mock.ensure_ssh.return_value = (True, "root", "SSH 登录已就绪")
+
+    result = containers_router.start_stopped_container(inst.id, test_user, db)
+
+    assert result["message"] == "Container is already running"
+    docker_mock.ensure_ssh.assert_called_once_with(inst.container_id, "secret", "root")
+    db.refresh(inst)
+    assert inst.status == "running"
+
+
+def test_start_stopped_does_not_claim_success_when_ssh_repair_fails(
+    db, test_user, docker_mock, gpu_mock
+):
+    inst = _make_instance(db, test_user.id, status="stopped")
+    inst.access_password = "secret"
+    db.commit()
+    docker_mock.is_container_running.return_value = True
+    docker_mock.ensure_ssh.return_value = (False, None, "SSH 服务未在映射端口就绪")
+
+    with pytest.raises(HTTPException) as excinfo:
+        containers_router.start_stopped_container(inst.id, test_user, db)
+
+    assert excinfo.value.status_code == 503
+    db.refresh(inst)
+    assert inst.status == "stopped"
+    assert not _active_alloc(db, inst.id)

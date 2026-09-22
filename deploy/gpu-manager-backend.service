@@ -17,7 +17,7 @@ WorkingDirectory=/amax/gpu_manager_v2/backend
 # override vars already present in the process environment, so a value set in
 # this unit would silently shadow the .env one. Missing .env → insecure
 # defaults from app/config.py — always ship a real .env.
-ExecStart=/home/amax/.local/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+ExecStart=/home/amax/.local/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 

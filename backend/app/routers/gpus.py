@@ -53,6 +53,13 @@ def get_gpu_status(
         allocation_users={gid: info["username"] for gid, info in allocation_info.items()},
     )
 
+    docker_claims_error = False
+    try:
+        docker_claims = docker_runner.get_running_gpu_claims(gpu_monitor.get_gpu_count())
+    except RuntimeError:
+        docker_claims = {}
+        docker_claims_error = True
+
     # 4. Override status with combined logic
     for gpu in raw_statuses:
         info = allocation_info.get(gpu["id"])
@@ -66,7 +73,13 @@ def get_gpu_status(
             gpu["status"] = "error"
         elif not gpu["allocated"]:
             # No DB allocation — check if GPU is actually being used
-            if gpu["memory_utilization"] > STALE_MEMORY_THRESHOLD or gpu["gpu_utilization"] > 10:
+            if docker_claims_error:
+                gpu["status"] = "error"
+                gpu["error"] = "无法确认 Docker 容器的 GPU 预留状态"
+            elif docker_claims.get(gpu["id"]):
+                gpu["status"] = "occupied"
+                gpu["allocated_to"] = "Docker 容器（系统外）"
+            elif gpu["memory_utilization"] > STALE_MEMORY_THRESHOLD or gpu["gpu_utilization"] > 10:
                 gpu["status"] = "occupied"
             else:
                 gpu["status"] = "free"

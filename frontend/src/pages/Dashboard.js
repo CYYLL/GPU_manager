@@ -3,10 +3,10 @@ import api from '../services/api';
 import AppHeader from '../components/AppHeader';
 
 const statusConfig = {
-  free: { label: 'FREE', color: '#52c41a', bg: '#f6ffed' },
-  occupied: { label: 'OCCUPIED', color: '#ff4d4f', bg: '#fff2f0' },
-  stale: { label: 'STALE', color: '#faad14', bg: '#fffbe6' },
-  error: { label: '⚠ ERROR', color: '#722ed1', bg: '#f9f0ff' },
+  free: { label: '空闲', color: '#52c41a', bg: '#f6ffed' },
+  occupied: { label: '已占用', color: '#ff4d4f', bg: '#fff2f0' },
+  stale: { label: '状态待核对', color: '#faad14', bg: '#fffbe6' },
+  error: { label: '⚠ 异常', color: '#722ed1', bg: '#f9f0ff' },
 };
 
 const getMemoryClass = (pct) => {
@@ -50,13 +50,13 @@ const Dashboard = () => {
         )}
         <div className="card" style={{ paddingBottom: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <h2 style={{ margin: 0 }}>GPU Status</h2>
+            <h2 style={{ margin: 0 }}>GPU 状态</h2>
             <div style={{ display: 'flex', gap: 20, fontSize: 14, color: '#888' }}>
-              <span><span className="badge-dot" style={{ background: '#52c41a' }}></span>Free</span>
-              <span><span className="badge-dot" style={{ background: '#ff4d4f' }}></span>Occupied</span>
-              <span><span className="badge-dot" style={{ background: '#faad14' }}></span>Stale</span>
-              <span><span className="badge-dot" style={{ background: '#722ed1' }}></span>Error</span>
-              <span>Auto-refresh 5s</span>
+              <span><span className="badge-dot" style={{ background: '#52c41a' }}></span>空闲</span>
+              <span><span className="badge-dot" style={{ background: '#ff4d4f' }}></span>已占用</span>
+              <span><span className="badge-dot" style={{ background: '#faad14' }}></span>待核对</span>
+              <span><span className="badge-dot" style={{ background: '#722ed1' }}></span>异常</span>
+              <span>每 5 秒自动刷新</span>
             </div>
           </div>
           <div className="gpu-grid">
@@ -76,13 +76,13 @@ const Dashboard = () => {
                   </h3>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     {gpu.error ? <span /> : <span className="gpu-temp">{gpu.temperature}°C</span>}
-                    {gpu.allocated_to && <span className="gpu-user">User: {gpu.allocated_to}</span>}
+                    {gpu.allocated_to && <span className="gpu-user">使用者：{gpu.allocated_to}</span>}
                   </div>
 
                   {/* Memory bar */}
                   <div className="progress-group">
                     <div className="progress-label">
-                      <span>Memory</span>
+                      <span>显存</span>
                       <span>{gpu.used_memory} / {gpu.total_memory} GB ({memPct}%)</span>
                     </div>
                     <div className="progress-bar">
@@ -94,7 +94,7 @@ const Dashboard = () => {
                   {/* Utilization bar */}
                   <div className="progress-group gpu-util-bar">
                     <div className="progress-label">
-                      <span>Utilization</span>
+                      <span>利用率</span>
                       <span>{utilPct}%</span>
                     </div>
                     <div className="progress-bar">

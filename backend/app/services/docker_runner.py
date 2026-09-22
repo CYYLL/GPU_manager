@@ -1,8 +1,9 @@
 import os
+import re
 import docker
 from docker.types import DeviceRequest, Mount
 from typing import List, Dict, Optional, Tuple
-from .ssh_access import configure_ssh_login
+from .ssh_access import configure_ssh_login, ssh_banner_ready
 import time
 
 class DockerRunner:
@@ -132,7 +133,21 @@ class DockerRunner:
                 if attempt == 29:
                     return False, None, "容器尚未准备好执行命令"
                 time.sleep(1)
-            return configure_ssh_login(container, password, preferred_username)
+            ok, username, reason = configure_ssh_login(container, password, preferred_username)
+            if not ok:
+                return ok, username, reason
+            container.reload()
+            bindings = (container.attrs.get("NetworkSettings", {}).get("Ports", {})
+                        .get("22/tcp") or [])
+            if not bindings or not bindings[0].get("HostPort"):
+                return False, None, "容器 SSH 端口映射缺失"
+            host_port = int(bindings[0]["HostPort"])
+            for attempt in range(5):
+                if ssh_banner_ready(host_port):
+                    return True, username, reason
+                if attempt < 4:
+                    time.sleep(0.2)
+            return False, None, "SSH 服务未在映射端口就绪"
         except Exception as exc:
             return False, None, f"SSH 初始化异常：{exc}"
 
@@ -209,6 +224,60 @@ class DockerRunner:
                 "status": c.status,
             })
         return result
+
+    def get_running_gpu_claims(self, total_gpu_count: int) -> Dict[int, List[Dict[str, str]]]:
+        """GPU devices exposed to running Docker containers, including unmanaged ones.
+
+        A GPU request without numeric device IDs could select any card. Reserve
+        every card in that case instead of trusting a low NVML utilization sample.
+        """
+        if not self.client:
+            raise RuntimeError("无法检查 Docker 容器的 GPU 预留状态")
+        claims: Dict[int, List[Dict[str, str]]] = {}
+        try:
+            containers = self.client.containers.list()
+            for container in containers:
+                host_config = container.attrs.get("HostConfig", {})
+                requests = host_config.get("DeviceRequests") or []
+                gpu_requests = [request for request in requests if
+                                any("gpu" in group for group in
+                                    (request.get("Capabilities") or []))]
+                device_ids = set()
+                unknown = False
+                for request in gpu_requests:
+                    requested = request.get("DeviceIDs") or []
+                    if not requested:
+                        unknown = True
+                    for device_id in requested:
+                        if str(device_id).isdigit() and int(device_id) < total_gpu_count:
+                            device_ids.add(int(device_id))
+                        else:
+                            unknown = True
+                for device in host_config.get("Devices") or []:
+                    match = re.fullmatch(r"/dev/nvidia(\d+)",
+                                         device.get("PathOnHost", ""))
+                    if match:
+                        device_ids.add(int(match.group(1)))
+                if host_config.get("Runtime") == "nvidia" and not gpu_requests:
+                    visible = next((value.split("=", 1)[1] for value in
+                                    container.attrs.get("Config", {}).get("Env", [])
+                                    if value.startswith("NVIDIA_VISIBLE_DEVICES=")), "all")
+                    if visible.lower() not in ("void", "none", ""):
+                        for device_id in visible.split(","):
+                            if device_id.isdigit() and int(device_id) < total_gpu_count:
+                                device_ids.add(int(device_id))
+                            else:
+                                unknown = True
+                if unknown:
+                    device_ids.update(range(total_gpu_count))
+                for gpu_id in device_ids:
+                    claims.setdefault(gpu_id, []).append({
+                        "container_id": container.id,
+                        "name": container.name,
+                    })
+        except Exception as exc:
+            raise RuntimeError(f"无法检查 Docker 容器的 GPU 预留状态：{exc}") from exc
+        return claims
 
     def is_container_running(self, container_id: str) -> Optional[bool]:
         """Return None when Docker cannot determine the state."""

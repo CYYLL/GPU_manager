@@ -1,16 +1,17 @@
 """OpenAI Chat Completions client (official OpenAI + OpenAI-compatible endpoints).
 
 Env (read only when LLM_PROVIDER=openai):
-  OPENAI_API_KEY   required
-  OPENAI_BASE_URL  optional, default https://api.openai.com/v1; put a compat
-                   endpoint here (e.g. Ark /api/v3 or a vLLM /v1 server)
-  OPENAI_MODEL     required (no built-in default: prevents accidental billing)
+  LLM_API_KEY     required; OPENAI_API_KEY is a legacy fallback
+  LLM_BASE_URL    optional; OPENAI_BASE_URL is a legacy fallback;
+                  defaults to https://api.openai.com/v1
+  LLM_MODEL       required; OPENAI_MODEL is a legacy fallback
   OPENAI_STREAMING auto|true|false (same semantics as LLM_STREAMING)
 
 All protocol conversion lives here (boundary A): the agent loop still speaks
 Anthropic-style messages; this class translates to/from OpenAI Chat Completions
-and exposes the neutral complete()/stream_complete() shapes. This module never
-reads LLM_*/ANTHROPIC_* env vars, so an anthropic gateway key cannot leak in.
+and exposes the neutral complete()/stream_complete() shapes. When switching
+providers, the shared LLM_API_KEY, LLM_BASE_URL and LLM_MODEL must be updated to values
+from the selected provider or compatible gateway.
 """
 import json
 import os
@@ -21,8 +22,13 @@ from .llm_client import BaseLLMClient, LLMResult
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
-def _require(env_var: str) -> str:
-    value = os.environ.get(env_var, "").strip()
+def _env_value(primary: str, fallback: str = "") -> str:
+    return (os.environ.get(primary, "").strip()
+            or (os.environ.get(fallback, "").strip() if fallback else ""))
+
+
+def _require(env_var: str, fallback: str = "") -> str:
+    value = _env_value(env_var, fallback)
     if not value:
         raise ValueError("%s must be set when LLM_PROVIDER=openai" % env_var)
     return value
@@ -31,9 +37,9 @@ def _require(env_var: str) -> str:
 class OpenAIClient(BaseLLMClient):
     def __init__(self):
         super().__init__(
-            api_key=_require("OPENAI_API_KEY"),
-            base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_OPENAI_BASE_URL,
-            model=_require("OPENAI_MODEL"),
+            api_key=_require("LLM_API_KEY", "OPENAI_API_KEY"),
+            base_url=_env_value("LLM_BASE_URL", "OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL,
+            model=_require("LLM_MODEL", "OPENAI_MODEL"),
             streaming=os.environ.get("OPENAI_STREAMING", "auto"),
         )
         from openai import OpenAI  # lazy: only when this provider is chosen

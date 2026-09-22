@@ -1,3 +1,4 @@
+import { apiErrorText } from '../services/errorMessages';
 import React, { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import AppHeader from '../components/AppHeader';
@@ -16,7 +17,7 @@ const AdminImages = () => {
       setImages(res.data);
       setError('');
     } catch (err) {
-      setError(err.response?.data?.detail || '加载本地镜像失败');
+      setError(apiErrorText(err, '加载本地镜像失败'));
     } finally {
       setLoading(false);
     }
@@ -36,7 +37,7 @@ const AdminImages = () => {
       });
       await fetchImages();
     } catch (err) {
-      alert(err.response?.data?.detail || '更新预设失败');
+      alert(apiErrorText(err, '更新预设失败'));
     } finally {
       setPresetPending((prev) => {
         const next = { ...prev };
@@ -53,7 +54,7 @@ const AdminImages = () => {
       alert(res.data?.message || '本地镜像已删除');
       fetchImages();
     } catch (err) {
-      alert(err.response?.data?.detail || '删除本地镜像失败');
+      alert(apiErrorText(err, '删除本地镜像失败'));
     }
   };
 
@@ -69,7 +70,7 @@ const AdminImages = () => {
             </button>
           </div>
           <p style={{ color: '#888', fontSize: 13, marginTop: 8 }}>
-            每位用户自行选择预设；此处的加入或移出只影响管理员账号。管理员可在 Agent 中拉取镜像，并在此删除本地镜像。
+            每位用户自行选择预设；此处的加入或移出只影响管理员账号。管理员可通过智能助手拉取镜像，并在此删除本地镜像。
           </p>
           {error && <p style={{ color: '#ff4d4f', marginTop: 12 }}>{error}</p>}
           {!error && images.length === 0 && <p style={{ marginTop: 16, color: '#888' }}>本地暂无镜像。</p>}

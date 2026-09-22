@@ -14,7 +14,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app import models
+from app import schemas
 import app.routers.containers as C
+import app.routers.gpus as G
 
 _FREE_GPUS = [
     {"id": i, "memory_utilization": 0.0, "gpu_utilization": 0} for i in range(4)
@@ -60,6 +62,7 @@ def _grant(db, gpu_id, inst_id, user_id):
 def docker_mock():
     m = mock.Mock()
     m.is_container_running.return_value = False
+    m.get_running_gpu_claims.return_value = {}
     m.start_container_by_id.return_value = (True, "running")
     m.start_container.return_value = ("d" * 64, "running", "root")
     m.remove_container.return_value = (True, "removed")
@@ -130,6 +133,61 @@ def test_restart_allows_when_gpu_free(db, docker_mock, gpu_mock):
     assert db.query(models.GpuAllocation).filter(
         models.GpuAllocation.container_instance_id == stopped_id,
         models.GpuAllocation.released_at.is_(None)).count() == 1
+
+
+def test_restart_rejects_idle_gpu_reserved_by_external_docker(db, docker_mock, gpu_mock):
+    user = _user(db, "alice")
+    instance_id = _mk(db, user.id, "b" * 64, gpu_ids=(1,))
+    docker_mock.get_running_gpu_claims.return_value = {
+        1: [{"container_id": "c" * 64, "name": "external"}]}
+
+    with pytest.raises(HTTPException) as excinfo:
+        C._start_stopped_container_impl(instance_id, user, db, "manual")
+
+    assert excinfo.value.status_code == 400
+    assert "external" in excinfo.value.detail
+    docker_mock.start_container_by_id.assert_not_called()
+
+
+def test_create_rejects_idle_gpu_reserved_by_external_docker(db, docker_mock, gpu_mock):
+    user = _user(db, "alice")
+    image = models.GpuImage(name="basic", image="basic:v1", min_gpu=1)
+    db.add(image)
+    db.flush()
+    db.add(models.UserImagePreset(user_id=user.id, image_ref=image.image))
+    db.commit()
+    gpu_mock.get_gpu_count.return_value = 1
+    docker_mock.get_running_gpu_claims.return_value = {
+        0: [{"container_id": "c" * 64, "name": "external"}]}
+
+    with pytest.raises(HTTPException) as excinfo:
+        C._start_container_impl(schemas.ContainerStartRequest(image_id=image.id, gpu_count=1),
+                                user, db, "manual")
+
+    assert excinfo.value.status_code == 400
+    assert "Docker 容器预留的 GPU" in excinfo.value.detail
+    docker_mock.start_container.assert_not_called()
+
+
+def test_gpu_status_marks_idle_external_docker_claim_occupied(
+    monkeypatch, db, docker_mock, gpu_mock
+):
+    user = _user(db, "alice")
+    gpu_mock.get_gpu_count.return_value = 1
+    gpu_mock.get_gpu_status.return_value = [{
+        "id": 0, "name": "GPU", "total_memory": 24, "used_memory": 0,
+        "free_memory": 24, "memory_utilization": 0.0, "gpu_utilization": 0,
+        "temperature": 30, "allocated": False, "allocated_to": None,
+    }]
+    docker_mock.get_running_gpu_claims.return_value = {
+        0: [{"container_id": "c" * 64, "name": "external"}]}
+    monkeypatch.setattr(G, "gpu_monitor", gpu_mock)
+    monkeypatch.setattr(G, "docker_runner", docker_mock)
+
+    status = G.get_gpu_status(user, db)
+
+    assert status[0]["status"] == "occupied"
+    assert status[0]["allocated_to"] == "Docker 容器（系统外）"
 
 
 # ── rebuild (removed→running)：冲突拒绝 / 空闲放行 ──────────────────────────────

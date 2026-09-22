@@ -1,9 +1,20 @@
 """Set up a password SSH login inside a managed container."""
 
 import crypt
+import socket
 
 
 MANAGED_USERNAME = "gpuuser"
+
+
+def ssh_banner_ready(port: int, host: str = "127.0.0.1") -> bool:
+    """Confirm that the published port answers as SSH, not just that sshd -T works."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=1) as connection:
+            connection.settimeout(1)
+            return connection.recv(32).startswith(b"SSH-")
+    except (OSError, ValueError):
+        return False
 
 
 def _exec(container, command):

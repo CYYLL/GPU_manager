@@ -1,3 +1,4 @@
+import { apiErrorText } from '../services/errorMessages';
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import AppHeader from '../components/AppHeader';
@@ -34,11 +35,11 @@ const UserProfile = () => {
     e.preventDefault();
     setPwMsg('');
     if (pwForm.new_password !== pwForm.confirm) {
-      setPwMsg('Passwords do not match');
+      setPwMsg('两次输入的密码不一致');
       return;
     }
     if (pwForm.new_password.length < 6) {
-      setPwMsg('Password must be at least 6 characters');
+      setPwMsg('新密码至少需要 6 个字符');
       return;
     }
     try {
@@ -46,10 +47,10 @@ const UserProfile = () => {
         old_password: pwForm.old_password,
         new_password: pwForm.new_password,
       });
-      setPwMsg('Password changed successfully!');
+      setPwMsg('密码修改成功');
       setPwForm({ old_password: '', new_password: '', confirm: '' });
     } catch (err) {
-      setPwMsg(err.response?.data?.detail || 'Failed to change password');
+      setPwMsg(apiErrorText(err, '修改密码失败'));
     }
   };
 
@@ -61,9 +62,9 @@ const UserProfile = () => {
     try {
       const checkRes = await api.get(`/api/admin/users/check/${resetForm.username}`);
       setCheckedUser(checkRes.data);
-      setResetMsg(`User '${checkRes.data.username}' found. Click Reset to set password to 0000000`);
+      setResetMsg(`已找到用户“${checkRes.data.username}”，请确认是否将密码重置为 0000000`);
     } catch (err) {
-      setResetMsg(err.response?.data?.detail || 'User not found');
+      setResetMsg(apiErrorText(err, '未找到该用户'));
     }
   };
 
@@ -74,11 +75,11 @@ const UserProfile = () => {
         username: resetForm.username,
         new_password: '0000000',
       });
-      setResetMsg(`Password for '${resetForm.username}' reset to 0000000`);
+      setResetMsg(`用户“${resetForm.username}”的密码已重置为 0000000`);
       setCheckedUser(null);
       setResetForm({ username: '' });
     } catch (err) {
-      setResetMsg(err.response?.data?.detail || 'Failed to reset password');
+      setResetMsg(apiErrorText(err, '重置密码失败'));
     }
   };
 
@@ -89,15 +90,15 @@ const UserProfile = () => {
         <div>
           <div className="content">
             <div className="card">
-              <h2>Profile</h2>
+              <h2>个人资料</h2>
               <p style={{ color: '#cf1322' }}>{fetchError}</p>
-              <button className="btn btn-primary" onClick={loadProfile}>Retry / 重试</button>
+              <button className="btn btn-primary" onClick={loadProfile}>重试</button>
             </div>
           </div>
         </div>
       );
     }
-    return <div>Loading...</div>;
+    return <div>正在加载…</div>;
   }
 
   return (
@@ -107,20 +108,20 @@ const UserProfile = () => {
         {fetchError && (
           <div className="card" style={{ padding: '12px 16px', background: '#fff7e6', border: '1px solid #ffd591' }}>
             <span style={{ color: '#d46b08', fontSize: 13 }}>{fetchError}</span>{' '}
-            <button className="btn" style={{ padding: '2px 8px', fontSize: 12 }} onClick={loadProfile}>Retry / 重试</button>
+            <button className="btn" style={{ padding: '2px 8px', fontSize: 12 }} onClick={loadProfile}>重试</button>
           </div>
         )}
         <div className="card">
-          <h2>User Profile</h2>
+          <h2>个人资料</h2>
           <table style={{ marginTop: 16 }}>
             <tbody>
-              <tr><td style={{ fontWeight: 600, width: 150 }}>Username</td><td>{user.username}</td></tr>
-              <tr><td style={{ fontWeight: 600 }}>Role</td><td>{user.role}</td></tr>
+              <tr><td style={{ fontWeight: 600, width: 150 }}>用户名</td><td>{user.username}</td></tr>
+              <tr><td style={{ fontWeight: 600 }}>角色</td><td>{user.role === 'admin' ? '管理员' : '普通用户'}</td></tr>
               {user.role !== 'admin' && (
                 <>
-                  <tr><td style={{ fontWeight: 600 }}>GPU Quota</td><td>{user.gpu_quota}</td></tr>
-                  <tr><td style={{ fontWeight: 600 }}>GPU Used</td><td>{user.gpu_used}</td></tr>
-                  <tr><td style={{ fontWeight: 600 }}>GPU Available</td><td>{(user.gpu_quota || 0) - (user.gpu_used || 0)}</td></tr>
+                  <tr><td style={{ fontWeight: 600 }}>GPU 配额</td><td>{user.gpu_quota}</td></tr>
+                  <tr><td style={{ fontWeight: 600 }}>已使用 GPU</td><td>{user.gpu_used}</td></tr>
+                  <tr><td style={{ fontWeight: 600 }}>剩余 GPU 配额</td><td>{(user.gpu_quota || 0) - (user.gpu_used || 0)}</td></tr>
                 </>
               )}
             </tbody>
@@ -128,40 +129,40 @@ const UserProfile = () => {
         </div>
 
         <div className="card">
-          <h2>Change Password</h2>
+          <h2>修改密码</h2>
           <form onSubmit={handleChangePassword} style={{ marginTop: 16 }}>
             <div style={{ marginBottom: 12 }}>
-              <input type="password" placeholder="Current password" required
+              <input type="password" placeholder="当前密码" required
                 value={pwForm.old_password}
                 onChange={e => setPwForm({ ...pwForm, old_password: e.target.value })}
                 style={{ width: 250 }} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <input type="password" placeholder="New password (min 6 chars)" required
+              <input type="password" placeholder="新密码（至少 6 个字符）" required
                 value={pwForm.new_password}
                 onChange={e => setPwForm({ ...pwForm, new_password: e.target.value })}
                 style={{ width: 250 }} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <input type="password" placeholder="Confirm new password" required
+              <input type="password" placeholder="确认新密码" required
                 value={pwForm.confirm}
                 onChange={e => setPwForm({ ...pwForm, confirm: e.target.value })}
                 style={{ width: 250 }} />
             </div>
-            <button type="submit" className="btn">Change Password</button>
-            {pwMsg && <p style={{ color: pwMsg.includes('success') ? '#52c41a' : '#ff4d4f', marginTop: 8 }}>{pwMsg}</p>}
+            <button type="submit" className="btn">修改密码</button>
+            {pwMsg && <p style={{ color: pwMsg.includes('成功') ? '#52c41a' : '#ff4d4f', marginTop: 8 }}>{pwMsg}</p>}
           </form>
         </div>
 
         {user.role === 'admin' && (
           <div className="card">
-            <h2>User Management / Reset Password</h2>
+            <h2>用户管理与密码重置</h2>
             <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
-              Look up a user by username to verify their existence, then reset their password to <strong>0000000</strong> (default password).
+              先通过用户名确认账号，再将其密码重置为默认密码 <strong>0000000</strong>。
             </p>
             <form onSubmit={handleAdminReset} style={{ marginTop: 16 }}>
               <div style={{ marginBottom: 12 }}>
-                <input type="text" placeholder="Username" required
+                <input type="text" placeholder="用户名" required
                   value={resetForm.username}
                   onChange={e => {
                     setResetForm({ ...resetForm, username: e.target.value });
@@ -171,27 +172,27 @@ const UserProfile = () => {
                   style={{ width: 250 }} />
               </div>
               {!checkedUser ? (
-                <button type="submit" className="btn btn-primary">Check User</button>
+                <button type="submit" className="btn btn-primary">查找用户</button>
               ) : (
                 <div>
                   <div style={{ marginBottom: 12, padding: 12, background: '#f0f5ff', borderRadius: 4, fontSize: 14 }}>
-                    <strong>{checkedUser.username}</strong> ({checkedUser.role})
-                    <br />ID: {checkedUser.id} | Quota: {checkedUser.gpu_quota}
+                    <strong>{checkedUser.username}</strong>（{checkedUser.role === 'admin' ? '管理员' : '普通用户'}）
+                    <br />编号：{checkedUser.id}｜GPU 配额：{checkedUser.gpu_quota}
                   </div>
                   <p style={{ fontSize: 13, color: '#888', marginBottom: 12 }}>
-                    Password will be reset to <strong>0000000</strong>
+                    密码将重置为 <strong>0000000</strong>
                   </p>
                   <button type="button" className="btn btn-primary" onClick={handleConfirmReset}
                     style={{ marginRight: 8 }}>
-                    Confirm Reset
+                    确认重置
                   </button>
                   <button type="button" className="btn btn-secondary"
                     onClick={() => { setCheckedUser(null); setResetMsg(''); }}>
-                    Cancel
+                    取消
                   </button>
                 </div>
               )}
-              {resetMsg && <p style={{ color: resetMsg.includes('success') ? '#52c41a' : '#ff4d4f', marginTop: 8 }}>{resetMsg}</p>}
+              {resetMsg && <p style={{ color: /已找到|已重置/.test(resetMsg) ? '#52c41a' : '#ff4d4f', marginTop: 8 }}>{resetMsg}</p>}
             </form>
           </div>
         )}

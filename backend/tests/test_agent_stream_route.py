@@ -54,16 +54,21 @@ def test_stream_route_emits_events_and_persists(monkeypatch, engine):
     db = TestSess()
     u = _mk_user(db)
 
-    # progressive disclosure: stub round 1 is intercepted (emits nothing),
-    # round 2 (schema loaded) actually executes, round 3 gives the reply.
+    # The common GPU tool is activated in the first round, saving a model trip.
     llm = mock.Mock()
     llm.stream_complete.side_effect = [
-        iter([{"type": "text", "delta": "好的"}, {"type": "tool_use", "id": "t1",
-              "name": "get_gpu_status", "input": {}}]),
-        iter([{"type": "tool_use", "id": "t2", "name": "get_gpu_status", "input": {}}]),
+        iter([{"type": "tool_use", "id": "t1", "name": "get_gpu_status", "input": {}}]),
         iter([{"type": "text", "delta": "4 张卡空闲"}]),
     ]
     monkeypatch.setattr(agent_router, "llm_client", llm)
+    monkeypatch.setattr(agent_router.ToolExecutor, "run",
+                        lambda self, name, inp: (True, "4 张卡空闲"))
+    # Keep the sync SSE generator in this test thread; StaticPool shares one
+    # SQLite connection and the threadpool wrapper can block the test.
+    async def _inline_iterator(iterator):
+        for chunk in iterator:
+            yield chunk
+    monkeypatch.setattr("starlette.responses.iterate_in_threadpool", _inline_iterator)
 
     resp = agent_router.chat_stream(agent_router.ChatRequest(message="查 GPU"), u, db)
     # StreamingResponse.body_iterator is async — collect via asyncio.run
@@ -77,7 +82,8 @@ def test_stream_route_emits_events_and_persists(monkeypatch, engine):
     events = [json.loads(ln[6:]) for ln in lines]
 
     kinds = [e["event"] for e in events]
-    assert kinds == ["text", "tool_use", "tool_result", "text", "done"]
+    assert kinds == ["tool_use", "tool_result", "text", "done"]
+    assert llm.stream_complete.call_count == 2
     assert events[-1]["event"] == "done"
     assert events[-1]["reply"] == "4 张卡空闲"
     # assistant message persisted in a fresh session

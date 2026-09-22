@@ -712,9 +712,45 @@ class ToolCatalog:
     def __contains__(self, name: str) -> bool:
         return name in self._full
 
+    def initial_active(self, user_text: str) -> set:
+        """Expose likely tool schemas on the first round, without a disclosure trip.
+
+        Only the current user message is considered. All other tools keep their
+        stubs, so an unusual request can still discover them in later rounds.
+        """
+        if not isinstance(user_text, str):
+            return set()
+        text = user_text.lower()
+        names = set()
+        if "gpu" in text or "显卡" in text or "显存" in text:
+            names.add("get_gpu_status")
+        if "配额" in text:
+            names.add("check_gpu_quota")
+        if "磁盘" in text or "存储空间" in text:
+            names.add("get_disk_status")
+        if "镜像" in text or "image" in text:
+            names.add("list_local_images")
+        if "镜像" in text and any(word in text for word in ("内容", "内部", "软件", "安装", "分析")):
+            names.add("inspect_image")
+        if "容器" in text or "container" in text:
+            names.add("list_containers")
+            is_question = any(word in text for word in ("为什么", "为何", "如何", "怎么", "什么原因"))
+            if not is_question:
+                if "创建" in text or "新建" in text:
+                    names.update(("list_local_images", "list_images", "check_gpu_quota", "create_container"))
+                if "启动" in text:
+                    names.add("start_container")
+                if "停止" in text:
+                    names.add("stop_container")
+                if "重建" in text:
+                    names.add("rebuild_container")
+                if "删除" in text:
+                    names.add("delete_container")
+        return names.intersection(self._full)
+
     def round_specs(self, active: set) -> List[Dict]:
         """active 内的工具发全量、其余发 stub。返回字典只含网关三键，长度=工具总数。"""
-        specs = [self._full[n] for n in active if n in self._full]
+        specs = [self._full[n] for n in self._full if n in active]
         specs += [{"name": n, "description": self._summaries[n],
                    "input_schema": _EMPTY_SCHEMA}
                   for n in self._full if n not in active]

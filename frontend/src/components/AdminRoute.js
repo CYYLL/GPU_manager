@@ -22,9 +22,9 @@ const AdminRoute = ({ children }) => {
 
   return (
     <div className="error-page">
-      <h2>403 Forbidden</h2>
-      <p>Admin access required.</p>
-      <Link to="/dashboard">Back to Dashboard</Link>
+      <h2>无权访问</h2>
+      <p>此页面仅限管理员使用。</p>
+      <Link to="/dashboard">返回 GPU 状态页</Link>
     </div>
   );
 };

@@ -1,3 +1,4 @@
+import { apiErrorText } from '../services/errorMessages';
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../services/api';
@@ -36,33 +37,33 @@ const Login = () => {
         navigate('/');
       }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Operation failed');
+      setError(apiErrorText(err, '操作失败'));
     }
   };
 
   return (
     <div className="login-container">
       <form onSubmit={handleSubmit} className="login-form">
-        <h2>{isRegister ? 'Register' : 'Login'}</h2>
+        <h2>{isRegister ? '注册账号' : '登录'}</h2>
         {error && <div className="error">{error}</div>}
         <div className="form-group">
-          <label>Username:</label>
+          <label>用户名：</label>
           <input type="text" value={username}
             onChange={(e) => setUsername(e.target.value)} required />
         </div>
         <div className="form-group">
-          <label>Password:</label>
+          <label>密码：</label>
           <input type="password" value={password}
             onChange={(e) => setPassword(e.target.value)} required />
         </div>
         <button type="submit" className="btn btn-primary" style={{ width: '100%' }}>
-          {isRegister ? 'Register' : 'Login'}
+          {isRegister ? '注册' : '登录'}
         </button>
         <div className="register-link">
           {isRegister ? (
-            <>Already have an account? <Link to="#" onClick={() => { setIsRegister(false); setError(''); }}>Login</Link></>
+            <>已有账号？<Link to="#" onClick={() => { setIsRegister(false); setError(''); }}>去登录</Link></>
           ) : (
-            <>Don't have an account? <Link to="#" onClick={() => { setIsRegister(true); setError(''); }}>Register</Link></>
+            <>还没有账号？<Link to="#" onClick={() => { setIsRegister(true); setError(''); }}>去注册</Link></>
           )}
         </div>
       </form>

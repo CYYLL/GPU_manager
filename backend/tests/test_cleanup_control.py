@@ -170,6 +170,46 @@ def test_real_docker_df_reclaim_does_not_raise_false_capacity_alert(monkeypatch,
     assert db.query(models.AdminAlert).count() == 0
 
 
+def test_zero_estimate_below_disk_threshold_does_not_raise_capacity_alert(monkeypatch, db, rule_llm):
+    _params(monkeypatch, cleanup.CleanupParams(
+        disk_threshold=85, container_reclaim_trigger_gb=1,
+        min_effective_free_gb=5))
+    user = _u(db)
+    inst = _stopped(db, user, "g" * 64)
+    runner = mock.Mock()
+    runner.df.return_value = {"Containers": [
+        {"Id": inst.container_id, "ImageID": None, "SizeRw": 0, "State": "exited"},
+        {"Id": "h" * 64, "ImageID": None, "SizeRw": 6 * 1024 ** 3,
+         "State": "exited"}], "Images": [], "BuildCache": []}
+    runner.is_container_running.return_value = False
+    runner.remove_container.return_value = (True, "removed")
+    with mock.patch.object(cleanup.shutil, "disk_usage", return_value=_disk_usage(69)):
+        out = cleanup.run_cleanup_cycle(runner=runner, db=db, llm_client=rule_llm)
+    assert out["removed"] == 1
+    assert out["source_freed"] == 0
+    assert out["escalated"] is False
+    assert db.query(models.AdminAlert).count() == 0
+
+
+def test_zero_estimate_above_disk_threshold_uses_accurate_alert(monkeypatch, db, rule_llm):
+    _params(monkeypatch, cleanup.CleanupParams(disk_threshold=85))
+    user = _u(db)
+    inst = _stopped(db, user, "i" * 64)
+    runner = mock.Mock()
+    runner.df.return_value = {"Containers": [
+        {"Id": inst.container_id, "ImageID": None, "SizeRw": 0,
+         "State": "exited"}], "Images": [], "BuildCache": []}
+    runner.is_container_running.return_value = False
+    runner.remove_container.return_value = (True, "removed")
+    with mock.patch.object(cleanup.shutil, "disk_usage", return_value=_disk_usage(90)):
+        out = cleanup.run_cleanup_cycle(runner=runner, db=db, llm_client=rule_llm)
+    alert = db.query(models.AdminAlert).filter(models.AdminAlert.type == "capacity").first()
+    assert out["escalated"] is True
+    assert alert is not None
+    assert "本轮容器清理估算回收 0 字节" in alert.message
+    assert "无更多可回收空间" not in alert.message
+
+
 def test_daily_cap_blocks(monkeypatch, db, rule_llm):
     _params(monkeypatch, cleanup.CleanupParams(max_per_day=2, cooldown_minutes=0))
     today = cleanup._start_of_today()

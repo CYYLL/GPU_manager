@@ -9,7 +9,8 @@ from app.agent.openai_client import OpenAIClient, DEFAULT_OPENAI_BASE_URL
 
 
 def _set_env(monkeypatch, **over):
-    base = {"OPENAI_API_KEY": "k", "OPENAI_MODEL": "m",
+    base = {"LLM_API_KEY": None, "LLM_BASE_URL": None, "LLM_MODEL": None,
+            "OPENAI_API_KEY": "k", "OPENAI_MODEL": "m",
             "OPENAI_BASE_URL": "http://openai.local/v1", "OPENAI_STREAMING": "auto"}
     base.update(over)
     for key, value in base.items():
@@ -52,19 +53,19 @@ def _response(*choices):
 
 
 def test_openai_requires_key_and_model(monkeypatch):
-    _set_env(monkeypatch, OPENAI_API_KEY=None)
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+    _set_env(monkeypatch, LLM_API_KEY=None, OPENAI_API_KEY=None)
+    with pytest.raises(ValueError, match="LLM_API_KEY"):
         OpenAIClient()
     _set_env(monkeypatch)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    with pytest.raises(ValueError, match="OPENAI_MODEL"):
+    with pytest.raises(ValueError, match="LLM_MODEL"):
         OpenAIClient()
 
 
-def test_openai_ignores_llm_env_and_defaults_base_url(monkeypatch):
-    monkeypatch.setenv("LLM_API_KEY", "anthropic-key")  # must NOT satisfy openai
-    monkeypatch.setenv("LLM_MODEL", "anthropic-model")
-    _set_env(monkeypatch, OPENAI_BASE_URL=None, OPENAI_API_KEY="openai-key",
+def test_openai_prefers_unified_key_url_and_model(monkeypatch):
+    _set_env(monkeypatch, LLM_API_KEY="shared-key", LLM_BASE_URL="http://shared/v1",
+             LLM_MODEL="shared-model",
+             OPENAI_API_KEY="legacy-key", OPENAI_BASE_URL="http://legacy/v1",
              OPENAI_MODEL="openai-model")
     captured = {}
 
@@ -74,11 +75,25 @@ def test_openai_ignores_llm_env_and_defaults_base_url(monkeypatch):
 
     monkeypatch.setattr("openai.OpenAI", _FakeOpenAI)
     client = OpenAIClient()
-    assert client.api_key == "openai-key"
-    assert client.model == "openai-model"
-    assert captured["base_url"] == DEFAULT_OPENAI_BASE_URL
-    assert captured["api_key"] == "openai-key"
+    assert client.api_key == "shared-key"
+    assert client.model == "shared-model"
+    assert captured["base_url"] == "http://shared/v1"
+    assert captured["api_key"] == "shared-key"
     assert captured["timeout"] == 60.0 and captured["max_retries"] == 2
+
+
+def test_openai_legacy_fallback_and_default_url(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: captured.update(kw))
+    _set_env(monkeypatch)
+    client = OpenAIClient()
+    assert client.api_key == "k"
+    assert client.model == "m"
+    assert captured["base_url"] == "http://openai.local/v1"
+
+    _set_env(monkeypatch, OPENAI_BASE_URL=None)
+    OpenAIClient()
+    assert captured["base_url"] == DEFAULT_OPENAI_BASE_URL
 
 
 def test_complete_converts_tools_and_messages_and_parses(monkeypatch):

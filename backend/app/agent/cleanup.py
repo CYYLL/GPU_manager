@@ -390,7 +390,6 @@ def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
         df = runner.df() or {}
         ctr, img, bc = reclaim_breakdown(df)
         usage_pct = _disk_usage_pct()
-        usage0 = usage_pct
 
         # Builder cache maintenance: independent of container removal — prune
         # whenever the reclaimable build cache crosses its own threshold.
@@ -454,19 +453,9 @@ def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
 
         escalated = False
         if removed > 0 and not p.dry_run:
-            # Dry runs free nothing → never alert on (in)effectiveness.
-            if usage0 <= p.disk_threshold:
-                # Entered via the docker-reclaim trigger → noise-free effectiveness gate.
-                eff, why = would_be_effective(source_freed, p, triggered_by_docker=True)
-                if not eff:
-                    level = "critical" if usage_pct > p.disk_critical else "warning"
-                    raise_capacity_alert(
-                        db,
-                        f"清理回收低于有效阈值（源头测量 {source_freed} 字节），容器层无更多可回收空间",
-                        level, {"source_freed": source_freed})
-                    escalated = True
-            elif usage_pct > p.disk_threshold:
-                # /amax path still over threshold after the round → structural check.
+            # A Docker-reclaim trigger alone is not a disk-capacity problem.
+            # Alert only if /amax remains above the disk threshold after cleanup.
+            if usage_pct > p.disk_threshold:
                 used_bytes = shutil.disk_usage(_mount_root()).used
                 ws = workspace_bytes_provider()
                 if used_bytes and ws / used_bytes > p.workspace_dominant_pct / 100.0:
@@ -476,6 +465,14 @@ def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
                         "磁盘不足由用户工作空间占用导致（结构性），容器清理无法释放有效空间，"
                         "请管理员扩容或引导用户清理工作区",
                         level, {"workspace_bytes": ws})
+                    escalated = True
+                elif not would_be_effective(source_freed, p, triggered_by_docker=False)[0]:
+                    level = "critical" if usage_pct > p.disk_critical else "warning"
+                    raise_capacity_alert(
+                        db,
+                        f"磁盘使用率仍高于阈值；本轮容器清理估算回收 {source_freed} 字节，"
+                        "请检查可回收候选和 Docker 空间统计",
+                        level, {"source_freed": source_freed, "usage_percent": usage_pct})
                     escalated = True
 
         return {"status": "ok", "removed": removed, "decision_source": decision_source,

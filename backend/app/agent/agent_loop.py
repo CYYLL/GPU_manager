@@ -51,6 +51,11 @@ _START_TOOLS = {"start_container", "rebuild_container"}
 _TERMINAL_START_TOOLS = {"create_container", "start_container", "rebuild_container"}
 
 
+def _latest_user_text(messages) -> str:
+    return next((item["content"] for item in reversed(messages)
+                 if item.get("role") == "user" and isinstance(item.get("content"), str)), "")
+
+
 def _requested_action(messages):
     user_text = next((item.get("content") for item in reversed(messages)
                       if item.get("role") == "user"), "")
@@ -101,7 +106,8 @@ def run_agent(llm_client: LLMClient, system: str, messages: List[Dict],
     # tools 可以是普通 list（原样发，兼容既有调用），或渐进式披露目录
     # （暴露 round_specs()/activation_text()/__contains__，见 tools.ToolCatalog）。
     catalog = tools if hasattr(tools, "round_specs") else None
-    active: set = set()  # 本调用内已加载完整 schema 的工具（sticky）
+    active: set = (catalog.initial_active(_latest_user_text(messages))
+                   if catalog is not None and hasattr(catalog, "initial_active") else set())
     started = time.monotonic()
     rounds = 0
     correction_attempted = False
@@ -219,7 +225,8 @@ def run_agent_stream(llm_client: LLMClient, system: str, messages: List[Dict],
     trace: List[Dict] = []
     # 同 run_agent：普通 list 或渐进式披露目录（见 tools.ToolCatalog）。
     catalog = tools if hasattr(tools, "round_specs") else None
-    active: set = set()
+    active: set = (catalog.initial_active(_latest_user_text(messages))
+                   if catalog is not None and hasattr(catalog, "initial_active") else set())
     started = time.monotonic()
     hold_text = _requested_action(messages) is not None
     correction_attempted = False
