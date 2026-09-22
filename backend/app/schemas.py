@@ -53,6 +53,11 @@ class GpuImageOut(BaseModel):
         from_attributes = True
 
 
+class ImagePresetSelection(BaseModel):
+    image_ref: str = Field(..., min_length=1, max_length=255)
+    selected: bool
+
+
 # ── Containers ──
 class ContainerStartRequest(BaseModel):
     image_id: int
@@ -74,6 +79,7 @@ class ContainerResponse(BaseModel):
     memory_limit: Optional[int] = None
     assigned_port: Optional[int] = None
     access_password: Optional[str] = None
+    ssh_username: Optional[str] = None
     cleanup_protected: bool = False  # 清理候选排除（自动清理引擎/前端保护开关）
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None

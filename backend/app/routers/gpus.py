@@ -78,7 +78,10 @@ def get_gpu_status(
 
             memory_idle = gpu["memory_utilization"] <= STALE_MEMORY_THRESHOLD
 
-            if container_running:
+            if container_running is None:
+                gpu["status"] = "error"
+                gpu["error"] = "无法确认容器 Docker 状态"
+            elif container_running:
                 gpu["status"] = "occupied"
             elif memory_idle:
                 gpu["status"] = "stale"

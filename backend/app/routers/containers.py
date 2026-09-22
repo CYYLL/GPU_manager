@@ -8,6 +8,7 @@ import string
 import os
 from datetime import datetime
 from docker.types import Mount
+from docker.errors import APIError, ImageNotFound
 
 from ..database import get_db
 from .. import schemas, models
@@ -16,6 +17,8 @@ from ..crud import users as user_crud
 from ..services.gpu_allocator import GPUAllocator
 from ..services.docker_runner import DockerRunner
 from ..services.gpu_monitor import get_gpu_monitor
+from ..services.image_presets import (sync_local_image_presets, local_image_entries,
+                                      selected_images, set_selection)
 from ..auth import get_current_user, get_current_admin
 
 router = APIRouter(tags=["containers"])
@@ -69,7 +72,44 @@ def list_images(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return container_crud.get_images(db)
+    sync_local_image_presets(db, docker_runner.client)
+    return selected_images(db, current_user.id)
+
+
+@router.get("/api/images/available")
+def list_available_images(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        entries = local_image_entries(docker_runner.client)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    sync_local_image_presets(db, docker_runner.client, entries)
+    catalog = {row.image: row for row in container_crud.get_images(db)}
+    selected = {row[0] for row in db.query(models.UserImagePreset.image_ref).filter_by(
+        user_id=current_user.id).all()}
+    return sorted(({"id": catalog[entry["image_ref"]].id,
+                    "image_ref": entry["image_ref"], "size_bytes": entry["size_bytes"],
+                    "selected": entry["image_ref"] in selected}
+                   for entry in entries if entry["image_ref"] in catalog),
+                  key=lambda row: row["id"])
+
+
+@router.put("/api/images/presets")
+def update_image_preset(
+    req: schemas.ImagePresetSelection,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        set_selection(db, current_user.id, req.image_ref, req.selected,
+                      docker_runner.client)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"image_ref": req.image_ref, "selected": req.selected}
 
 
 @router.post("/api/containers/start", response_model=schemas.ContainerResponse)
@@ -87,12 +127,15 @@ def _start_container_impl(req: schemas.ContainerStartRequest, current_user: mode
     image_record = container_crud.get_image_by_id(db, req.image_id)
     if not image_record:
         raise HTTPException(status_code=404, detail="Image not found")
+    if not db.query(models.UserImagePreset).filter_by(
+            user_id=current_user.id, image_ref=image_record.image).first():
+        raise HTTPException(status_code=403, detail="请先将该本地镜像加入自己的预设")
 
     # 2. Validate GPU count >= image minimum
     if req.gpu_count < image_record.min_gpu:
         raise HTTPException(
             status_code=400,
-            detail=f"This image requires at least {image_record.min_gpu} GPU(s)",
+            detail=f"镜像预设最低需要 {image_record.min_gpu} 张 GPU，当前请求 {req.gpu_count} 张",
         )
 
     # 3. Check user does not already have a running container
@@ -150,7 +193,7 @@ def _start_container_impl(req: schemas.ContainerStartRequest, current_user: mode
                 type="bind",
             )
             try:
-                docker_id, docker_status = docker_runner.start_container(
+                docker_id, docker_status, ssh_username = docker_runner.start_container(
                     image=image_record.image,
                     name=container_name,
                     gpu_ids=gpu_ids,
@@ -176,6 +219,7 @@ def _start_container_impl(req: schemas.ContainerStartRequest, current_user: mode
                 memory_limit=req.memory_limit,
                 assigned_port=assigned_port,
                 access_password=access_password,
+                ssh_username=ssh_username,
                 env_vars=req.env_vars,
             )
 
@@ -197,6 +241,7 @@ def _start_container_impl(req: schemas.ContainerStartRequest, current_user: mode
         memory_limit=instance.memory_limit,
         assigned_port=instance.assigned_port,
         access_password=instance.access_password,
+        ssh_username=instance.ssh_username,
         created_at=instance.created_at,
         started_at=instance.started_at,
     )
@@ -229,7 +274,7 @@ def _stop_container_impl(instance_id: int, current_user: models.User, db: Sessio
 
     # Stop Docker container (preserve, don't remove)
     success, msg = docker_runner.stop_container(instance.container_id)
-    if not success and docker_runner.is_container_running(instance.container_id):
+    if not success and docker_runner.is_container_running(instance.container_id) is not False:
         # Stop failed while the container is still running. Marking the instance
         # stopped / releasing the GPUs here would leave a live container with no
         # DB record, which the UI can then neither stop nor start. Surface it.
@@ -321,7 +366,10 @@ def _start_stopped_container_impl(instance_id: int, current_user: models.User, d
             # If the Docker container is actually still running (e.g. an earlier
             # stop failed after the DB was marked stopped), heal the DB record
             # instead of failing on the busy-GPU check below.
-            if docker_runner.is_container_running(instance.container_id):
+            docker_state = docker_runner.is_container_running(instance.container_id)
+            if docker_state is None:
+                raise HTTPException(status_code=503, detail="无法确认 Docker 容器状态，请稍后重试")
+            if docker_state:
                 if not container_crud.restore_container_instance(db, instance):
                     raise HTTPException(
                         status_code=400,
@@ -335,13 +383,15 @@ def _start_stopped_container_impl(instance_id: int, current_user: models.User, d
             if reason:
                 raise HTTPException(status_code=400, detail=reason)
 
-            # Re-allocate original GPUs
-            container_crud.create_allocations(db, instance.gpu_ids, instance.id, current_user.id)
-
             # Docker start (preserves container environment)
-            success, msg = docker_runner.start_container_by_id(instance.container_id, ssh_password=instance.access_password)
+            success, msg = docker_runner.start_container_by_id(
+                instance.container_id, ssh_password=instance.access_password,
+                ssh_username=instance.ssh_username)
             if not success:
                 raise HTTPException(status_code=500, detail=msg)
+            if msg != "running":
+                instance.ssh_username = msg
+            container_crud.create_allocations(db, instance.gpu_ids, instance.id, current_user.id)
 
             # Update status
             container_crud.start_container_instance(db, instance.id)
@@ -399,7 +449,7 @@ def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Ses
             volume_mount = Mount(target="/workspace", source=mount_dir, type="bind")
 
             try:
-                docker_id, _docker_status = docker_runner.start_container(
+                docker_id, _docker_status, ssh_username = docker_runner.start_container(
                     image=instance.image,
                     name=container_name,
                     gpu_ids=instance.gpu_ids,
@@ -414,6 +464,7 @@ def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Ses
                 raise HTTPException(status_code=500, detail=str(e))
 
             instance.container_id = docker_id
+            instance.ssh_username = ssh_username
             instance.status = "running"
             instance.started_at = datetime.utcnow()
             instance.stopped_at = None
@@ -431,6 +482,7 @@ def _rebuild_container_impl(instance_id: int, current_user: models.User, db: Ses
         gpu_count=instance.gpu_count, cpu_limit=instance.cpu_limit,
         memory_limit=instance.memory_limit, assigned_port=instance.assigned_port,
         access_password=instance.access_password, created_at=instance.created_at,
+        ssh_username=instance.ssh_username,
         started_at=instance.started_at,
     )
 
@@ -449,12 +501,12 @@ def list_containers(
     synced = []
     for inst in instances:
         docker_running = docker_runner.is_container_running(inst.container_id)
-        if inst.status == "running" and not docker_running:
+        if inst.status == "running" and docker_running is False:
             # Container was stopped externally (e.g. docker stop/rm, host reboot)
             container_crud.release_allocations_by_container(db, inst.id)
             container_crud.stop_container_instance(db, inst.id)
             inst.status = "stopped"
-        elif inst.status == "stopped" and docker_running:
+        elif inst.status == "stopped" and docker_running is True:
             # Docker is actually running but the DB says stopped (e.g. an earlier
             # stop failed after the DB was updated). Heal so the frontend status
             # and GPU user attribution are consistent with Docker again.
@@ -475,6 +527,7 @@ def list_containers(
             memory_limit=inst.memory_limit,
             assigned_port=inst.assigned_port,
             access_password=inst.access_password,
+            ssh_username=inst.ssh_username,
             cleanup_protected=inst.cleanup_protected,
             created_at=inst.created_at,
             started_at=inst.started_at,
@@ -482,6 +535,34 @@ def list_containers(
         )
         for inst in synced
     ]
+
+
+@router.post("/api/containers/{instance_id}/ssh/repair")
+def repair_container_ssh(instance_id: int,
+                         current_user: models.User = Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    return _repair_container_ssh_impl(instance_id, current_user, db, "manual")
+
+
+def _repair_container_ssh_impl(instance_id: int, current_user: models.User,
+                               db: Session, source: str = "manual"):
+    instance = container_crud.get_container_instance(db, instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail="容器不存在")
+    if current_user.role != "admin" and instance.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修复此容器的 SSH 登录")
+    if instance.status != "running" or docker_runner.is_container_running(instance.container_id) is not True:
+        raise HTTPException(status_code=400, detail="容器未运行")
+    if not instance.access_password:
+        raise HTTPException(status_code=400, detail="容器没有已保存的访问密码")
+    ok, username, reason = docker_runner.setup_ssh(
+        instance.container_id, instance.access_password, instance.ssh_username)
+    if not ok:
+        raise HTTPException(status_code=500, detail=reason)
+    instance.ssh_username = username
+    db.commit()
+    container_crud.record_container_event(db, instance.id, current_user.id, "ssh_repair", source)
+    return {"ssh_username": username, "assigned_port": instance.assigned_port}
 
 
 @router.get("/api/containers/{instance_id}/logs")
@@ -527,7 +608,19 @@ def admin_create_image(
     current_user: models.User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    return container_crud.create_image(db, image, current_user.id)
+    try:
+        set_selection(db, current_user.id, image.image, True, docker_runner.client)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    row = db.query(models.GpuImage).filter_by(image=image.image).first()
+    row.name = image.name
+    row.description = image.description or ""
+    row.min_gpu = image.min_gpu or 1
+    row.recommended_gpu = image.recommended_gpu or 1
+    db.commit()
+    return row
 
 
 @router.delete("/api/admin/images/{image_id}", response_model=schemas.Message)
@@ -536,9 +629,66 @@ def admin_delete_image(
     current_user: models.User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    if not container_crud.delete_image(db, image_id):
+    image = container_crud.get_image_by_id(db, image_id)
+    if image is None:
         raise HTTPException(status_code=404, detail="Image not found")
-    return {"message": "Image deleted"}
+    db.query(models.UserImagePreset).filter_by(
+        user_id=current_user.id, image_ref=image.image).delete()
+    db.commit()
+    return {"message": "预设已移除，本地镜像保留"}
+
+
+def _delete_local_image_impl(image_id: int, db: Session):
+    """Remove one local image tag after checking every Docker container."""
+    image = container_crud.get_image_by_id(db, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="预设镜像不存在")
+    image_ref = image.image
+    if docker_runner.client is None:
+        raise HTTPException(status_code=503, detail="Docker 服务不可用，无法删除本地镜像")
+    try:
+        local = docker_runner.client.images.get(image_ref)
+    except ImageNotFound:
+        raise HTTPException(status_code=404, detail="本地镜像不存在；可将它从个人预设中移出")
+    except APIError as exc:
+        raise HTTPException(status_code=503, detail=f"查询本地镜像失败：{exc}")
+
+    try:
+        # Docker's ancestor filter covers containers using this image ID, even
+        # when they were created from another tag of the same image.
+        used_by = docker_runner.client.containers.list(
+            all=True, filters={"ancestor": local.id})
+    except APIError as exc:
+        raise HTTPException(status_code=503, detail=f"检查镜像占用失败，已拒绝删除：{exc}")
+    if used_by:
+        raise HTTPException(
+            status_code=409,
+            detail=f"警告：镜像 {image_ref} 正被 {len(used_by)} 个容器使用（包括已停止容器），已拒绝删除。请先处理这些容器。",
+        )
+
+    try:
+        docker_runner.client.images.remove(image_ref, force=False)
+    except ImageNotFound:
+        raise HTTPException(status_code=404, detail="本地镜像已不存在")
+    except APIError as exc:
+        raise HTTPException(status_code=409, detail=f"镜像删除失败，可能仍被容器或构建任务引用：{exc}")
+    # Multiple preset rows can refer to the same tag. Remove all stale rows.
+    db.query(models.GpuImage).filter(models.GpuImage.image == image_ref).delete(
+        synchronize_session=False)
+    db.expunge(image)
+    db.query(models.UserImagePreset).filter_by(image_ref=image_ref).delete()
+    container_crud.renumber_image_ids(db)
+    db.commit()
+    return {"message": f"已删除本地镜像标签 {image_ref} 及对应预设记录；共享镜像层可能仍被其他标签保留"}
+
+
+@router.delete("/api/admin/images/{image_id}/local", response_model=schemas.Message)
+def admin_delete_local_image(
+    image_id: int,
+    current_user: models.User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return _delete_local_image_impl(image_id, db)
 
 
 # ── Admin: Container mount root ──

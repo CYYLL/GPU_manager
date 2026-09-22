@@ -61,7 +61,7 @@ def docker_mock():
     m = mock.Mock()
     m.is_container_running.return_value = False
     m.start_container_by_id.return_value = (True, "running")
-    m.start_container.return_value = ("d" * 64, "running")
+    m.start_container.return_value = ("d" * 64, "running", "root")
     m.remove_container.return_value = (True, "removed")
     C.docker_runner = m
     return m

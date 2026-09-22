@@ -157,6 +157,7 @@ const AdminUsers = () => {
                                       <th>Container ID</th>
                                       <th>Image</th>
                                       <th>Port</th>
+                                      <th>SSH 用户</th>
                                       <th>GPUs</th>
                                       <th>Password</th>
                                       <th>Status</th>
@@ -169,6 +170,7 @@ const AdminUsers = () => {
                                         <td style={{ fontFamily: 'monospace' }}>{c.container_id}</td>
                                         <td>{c.image}</td>
                                         <td>{c.assigned_port || '-'}</td>
+                                        <td>{c.ssh_username || '未确认'}</td>
                                         <td>{c.gpu_count} (IDs: {c.gpu_ids?.join(',')})</td>
                                         <td>
                                           {c.access_password ? (

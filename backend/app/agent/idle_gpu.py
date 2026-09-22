@@ -176,7 +176,7 @@ def scan_idle_gpus(db: Session, gpu_monitor, docker_runner, now: datetime = None
             continue
 
         ok, msg = docker_runner.stop_container(inst2.container_id)
-        if not ok and docker_runner.is_container_running(inst2.container_id):
+        if not ok and docker_runner.is_container_running(inst2.container_id) is not False:
             out["errors"].append(f"id={inst2.id}: {msg}")
             continue
         container_crud.release_allocations_by_container(db, inst2.id)

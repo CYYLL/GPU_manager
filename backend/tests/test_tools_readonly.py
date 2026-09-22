@@ -1,4 +1,5 @@
 """Read-only + protection tools: ownership enforced, live queries, structured output."""
+from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -54,6 +55,8 @@ def _mk_image(db, name="pytorch:latest"):
 def test_list_images(db):
     u = _mk_user(db)
     im = _mk_image(db)
+    db.add(models.UserImagePreset(user_id=u.id, image_ref=im.image))
+    db.commit()
     ex = agent_tools.ToolExecutor(db, u)
     ok, text = ex.run("list_images", {})
     assert ok is True
@@ -68,6 +71,56 @@ def test_list_images_empty(db):
     ok, text = ex.run("list_images", {})
     assert ok is True
     assert "没有可用镜像" in text
+
+
+def test_hub_search_requires_local_image_check(monkeypatch, db):
+    admin = _mk_user(db)
+    admin.role = "admin"
+    executor = agent_tools.ToolExecutor(db, admin)
+    searches = []
+    monkeypatch.setattr(agent_tools, "search_images", lambda user_id, query: searches.append(query) or [])
+
+    ok, result = executor.run("search_hub_images", {"query": "pytorch"})
+    assert not ok and "list_local_images" in result
+    assert searches == []
+
+    # The preset table alone is incomplete and must not unlock Hub search.
+    assert executor.run("list_images", {})[0]
+    assert not executor.run("search_hub_images", {"query": "pytorch"})[0]
+    monkeypatch.setattr(agent_tools, "docker_runner", SimpleNamespace(client=SimpleNamespace(
+        images=SimpleNamespace(list=lambda: []))))
+    assert executor.run("list_local_images", {})[0]
+    ok, result = executor.run("search_hub_images", {"query": "pytorch"})
+    assert ok and searches == ["pytorch"]
+
+
+def test_all_users_can_list_and_inspect_unregistered_local_image(monkeypatch, db):
+    user = _mk_user(db)
+    local = SimpleNamespace(tags=["private/app:v1"], id="sha256:" + "a" * 64,
+                            attrs={"Size": 1234})
+    monkeypatch.setattr(agent_tools, "docker_runner", SimpleNamespace(client=SimpleNamespace(
+        images=SimpleNamespace(list=lambda: [local]))))
+    monkeypatch.setattr(agent_tools, "inspect_local_image", lambda ref: {"image": ref})
+    executor = agent_tools.ToolExecutor(db, user)
+
+    ok, listing = executor.run("list_local_images", {})
+    assert ok and "private/app:v1" in listing and "size_bytes=1234" in listing
+    assert "preset_selected=false" in listing
+    assert db.query(models.GpuImage).count() == 0
+    ok, report = executor.run("inspect_image", {"image_ref": "private/app:v1"})
+    assert ok and '"image": "private/app:v1"' in report
+
+
+def test_all_users_can_inspect_registered_image(monkeypatch, db):
+    user = _mk_user(db)
+    image = _mk_image(db)
+    monkeypatch.setattr(agent_tools, "inspect_local_image", lambda ref: {
+        "image": ref, "base_os": "Ubuntu 22.04", "notable_packages": ["python3=3.10"]})
+    executor = agent_tools.ToolExecutor(db, user)
+    ok, result = executor.run("inspect_image", {"image_id": image.id})
+    assert ok and "Ubuntu 22.04" in result and "python3=3.10" in result
+    ok, result = executor.run("inspect_image", {"image_id": image.id + 100})
+    assert not ok and "不存在" in result
 
 
 def test_list_containers_only_own(monkeypatch, db):

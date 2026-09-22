@@ -14,7 +14,23 @@ def get_image_by_id(db: Session, image_id: int):
 
 
 def get_images(db: Session):
-    return db.query(models.GpuImage).all()
+    return db.query(models.GpuImage).order_by(models.GpuImage.id).all()
+
+
+def renumber_image_ids(db: Session):
+    """Compact preset IDs after deletion; no table refers to GpuImage.id."""
+    rows = get_images(db)
+    moved = [(new_id, row) for new_id, row in enumerate(rows, start=1)
+             if row.id != new_id]
+    if not moved:
+        return
+    # Move through negative IDs so an existing row never occupies a target ID.
+    for _, row in moved:
+        row.id = -row.id
+    db.flush()
+    for new_id, row in moved:
+        row.id = new_id
+    db.flush()
 
 
 def create_image(db: Session, image: schemas.GpuImageCreate, created_by: int):
@@ -37,6 +53,8 @@ def delete_image(db: Session, image_id: int) -> bool:
     if not db_image:
         return False
     db.delete(db_image)
+    db.flush()
+    renumber_image_ids(db)
     db.commit()
     return True
 
@@ -95,6 +113,7 @@ def create_container_instance(
     memory_limit: Optional[int] = None,
     assigned_port: Optional[int] = None,
     access_password: Optional[str] = None,
+    ssh_username: Optional[str] = None,
     env_vars: Optional[dict] = None,
 ) -> models.ContainerInstance:
     now = datetime.utcnow()
@@ -109,6 +128,7 @@ def create_container_instance(
         memory_limit=memory_limit,
         assigned_port=assigned_port,
         access_password=access_password,
+        ssh_username=ssh_username,
         env_vars=env_vars or {},
         started_at=now,
     )

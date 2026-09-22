@@ -19,6 +19,11 @@ from ..crud import users as user_crud
 from ..services.docker_runner import DockerRunner
 from ..services.gpu_monitor import get_gpu_monitor
 from ..services.host_ip import get_host_ip
+from ..services.image_pull import search_images, start_pull
+from ..services.image_inspector import inspect_local_image
+from ..services.image_presets import sync_local_image_presets, selected_images, set_selection
+from .validation import (REJECTION_PREFIX, requested_gpu_count,
+                         zero_gpu_count, zero_gpu_reply)
 from ..routers import containers as containers_router
 
 docker_runner = DockerRunner()
@@ -60,9 +65,45 @@ _TOOL_DEFS: List[Dict] = [
      "description": "查询宿主磁盘水位",
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "list_images",
-     "summary": "列出可创建容器的预设镜像（创建时用其 id）",
-     "description": "列出可用的预设镜像（创建容器时用其中的 id）",
+     "summary": "列出当前用户已选的镜像预设及其 id",
+     "description": "只列出当前账号自己选择的预设镜像；创建容器时使用其中的 id。查询全部 Docker 本地镜像请用 list_local_images。",
      "input_schema": {"type": "object", "properties": {}}},
+    {"name": "set_image_preset",
+     "summary": "将本地镜像加入或移出当前用户自己的预设（所有用户）",
+     "description": "所有用户可用。按 list_local_images 返回的完整 image_ref，设置当前账号自己的镜像预设。"
+     "只改变当前账号可创建容器的镜像列表，不拉取或删除真正的 Docker 镜像。",
+     "input_schema": {"type": "object", "properties": {
+         "image_ref": {"type": "string"}, "selected": {"type": "boolean"}},
+         "required": ["image_ref", "selected"]}},
+    {"name": "list_local_images",
+     "summary": "列出 Docker 本地全部镜像，包括未加入预设的镜像（所有用户）",
+     "description": "所有用户可用。直接列出 Docker 守护进程中的全部本地镜像及其标签、镜像 ID、大小和当前账号的实时预设状态 preset_selected，"
+     "包括未加入当前账号预设的镜像；查询镜像需求或预设状态时先调用。",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "inspect_image",
+     "summary": "按本地镜像引用或预设 ID 检查系统、架构和软件包（所有用户）",
+     "description": "所有用户可用。优先传 list_local_images 返回的 image_ref，可检查未登记的本地镜像；"
+     "也可传 list_images 返回的预设 image_id。二者任选其一。"
+     "读取镜像元数据及 dpkg/apk 软件包记录，不运行镜像程序；未列出的软件不代表镜像中不存在。",
+     "input_schema": {"type": "object", "properties": {
+         "image_ref": {"type": "string"}, "image_id": {"type": "integer"}}}},
+    {"name": "search_hub_images",
+     "summary": "管理员：本地无合适镜像时搜索 Docker Hub 镜像和标签",
+     "description": "仅管理员。先用 list_local_images 查 Docker 本地全部镜像，检查可能符合需求的镜像；本地没有合适候选时，"
+     "根据需求提炼关键词搜索 Docker Hub，返回真实简介及可选的完整镜像标签。先介绍候选，等待用户下一条消息选择。",
+     "input_schema": {"type": "object", "properties": {
+         "query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "pull_hub_image",
+     "summary": "管理员：用户明确选择候选后，后台拉取 Docker Hub 镜像",
+     "description": "仅管理员。管理员在上一轮搜索结果中明确选择一个完整镜像标签后调用。返回任务编号，前端显示拉取进度。",
+     "input_schema": {"type": "object", "properties": {
+         "image_ref": {"type": "string"}}, "required": ["image_ref"]}},
+    {"name": "delete_local_image",
+     "summary": "管理员：删除指定预设对应的本地 Docker 镜像；被容器使用时拒绝",
+     "description": "仅管理员。在管理员当前消息明确指定完整镜像名称和标签后，按 list_local_images 返回的 image_ref 删除本地镜像及所有用户的对应预设。"
+     "若任何运行或停止的 Docker 容器使用该镜像，返回警告且拒绝删除；操作不可撤销，执行前须用户本人明确确认。",
+     "input_schema": {"type": "object", "properties": {
+         "image_ref": {"type": "string"}, "image_id": {"type": "integer"}}}},
     {"name": "set_container_protection",
      "summary": "设置/取消某容器的清理保护（id, protected）",
      "description": "设置或取消某容器的清理保护",
@@ -98,7 +139,7 @@ _TOOL_DEFS: List[Dict] = [
      "summary": "删除一个普通用户及其容器与数据库记录（仅管理员，不可恢复）",
      "description": "删除一个普通用户（username，与 User management 页删除同口径、只针对普通用户）："
      "先停止并移除该用户名下所有 docker 容器本体，再清除其全部数据库记录"
-     "（容器记录、GPU 分配、其创建的镜像、账号）。删除后用户 id 会重排。"
+     "（容器记录、GPU 分配、个人镜像预设、账号）；本地 Docker 镜像和其他用户的预设保留。删除后用户 id 会重排。"
      "绝不删除宿主机上的工作区挂载目录（CONTAINER_MOUNT_ROOT 下的 gpu-<username> 保留，"
      "该用户名被重新注册时可复用同一工作区）。"
      "仅管理员可调用，普通用户调用会被拒绝；管理员账号不能作为删除目标；"
@@ -106,13 +147,20 @@ _TOOL_DEFS: List[Dict] = [
      "input_schema": {"type": "object", "properties": {
          "username": {"type": "string"}}, "required": ["username"]}},
     {"name": "create_container",
-     "summary": "按镜像创建并启动容器（image_id 必填；可配 gpu_count 等）",
-     "description": "创建并启动一个新容器",
+     "summary": "按用户指定的镜像创建容器；未指定 GPU 数时默认 1 张",
+     "description": "创建并启动一个新容器。用户未指定 GPU 数量时默认 1；"
+     "明确指定时必须使用该数量并通过配额和镜像最低 GPU 数校验；0 GPU 不支持，不能擅自改为 1。",
      "input_schema": {"type": "object", "properties": {
          "image_id": {"type": "integer"},
          "gpu_count": {"type": "integer", "minimum": 1, "maximum": 4, "default": 1},
          "cpu_limit": {"type": "number"}, "memory_limit": {"type": "integer"},
          "env_vars": {"type": "object"}}, "required": ["image_id"]}},
+    {"name": "repair_container_ssh",
+     "summary": "修复指定运行中容器的 SSH 密码登录，必要时创建专用用户",
+     "description": "容器拥有者或管理员可调用。检查 SSH 的实际认证规则；若 root 不能用密码登录，"
+     "在容器内创建专用登录用户并设置已保存的容器访问密码。返回实际 SSH 用户名，不返回密码。",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
     {"name": "start_container",
      "summary": "启动一个已停止的容器（id）",
      "description": "启动一个已停止的容器",
@@ -191,9 +239,12 @@ def _human_bytes(b: float) -> str:
 
 
 class ToolExecutor:
-    def __init__(self, db: Session, user: models.User):
+    def __init__(self, db: Session, user: models.User, turn_started_at=None):
         self.db = db
         self.user = user
+        self.turn_started_at = turn_started_at
+        self.user_message = None
+        self.local_images_checked = False
 
     def run(self, name: str, inp: Dict) -> Tuple[bool, str]:
         handler = getattr(self, f"_tool_{name}", None)
@@ -233,7 +284,7 @@ class ToolExecutor:
             lines.append(
                 f"- id={i.id} cid={i.container_id[:12]} image={i.image} "
                 f"status={i.status} docker_running={running} gpu={i.gpu_ids} "
-                f"protected={i.cleanup_protected}{port_txt}{owner}"
+                f"protected={i.cleanup_protected} ssh_user={i.ssh_username or '未确认'}{port_txt}{owner}"
             )
         return True, "\n".join(lines) if lines else "（没有容器）"
 
@@ -247,7 +298,8 @@ class ToolExecutor:
         owner = f" user={inst.user.username}" if self.user.role == "admin" else ""
         return True, (f"id={inst.id} image={inst.image} status={inst.status} "
                       f"docker_running={running} gpu={inst.gpu_ids} "
-                      f"protected={inst.cleanup_protected}{_access_address(inst.assigned_port)} "
+                      f"protected={inst.cleanup_protected} ssh_user={inst.ssh_username or '未确认'}"
+                      f"{_access_address(inst.assigned_port)} "
                       f"last_used_ts={container_crud.get_last_used(self.db, inst.id)}{owner}")
 
     def _tool_get_gpu_status(self, inp) -> Tuple[bool, str]:
@@ -293,10 +345,120 @@ class ToolExecutor:
                       f"free={_human_bytes(usage.free)} total={_human_bytes(usage.total)}")
 
     def _tool_list_images(self, inp) -> Tuple[bool, str]:
-        images = container_crud.get_images(self.db)
+        sync_local_image_presets(self.db, docker_runner.client)
+        images = selected_images(self.db, self.user.id)
         lines = [f"- id={im.id} name={im.name} image={im.image} min_gpu={im.min_gpu}"
                  for im in images]
         return True, "\n".join(lines) if lines else "（没有可用镜像）"
+
+    def _tool_set_image_preset(self, inp) -> Tuple[bool, str]:
+        image_ref = inp.get("image_ref")
+        selected = inp.get("selected")
+        if not isinstance(image_ref, str) or not image_ref.strip() or not isinstance(selected, bool):
+            return False, "请提供完整 image_ref 和布尔值 selected"
+        try:
+            set_selection(self.db, self.user.id, image_ref, selected,
+                          docker_runner.client)
+        except (ValueError, RuntimeError) as exc:
+            return False, str(exc)
+        return True, "当前账号镜像预设已更新 image_ref=%s preset_selected=%s" % (
+            image_ref, str(selected).lower())
+
+    def _tool_list_local_images(self, inp) -> Tuple[bool, str]:
+        if docker_runner.client is None:
+            return False, "Docker 服务不可用，无法查询本地镜像"
+        try:
+            local_images = docker_runner.client.images.list()
+        except Exception as exc:
+            return False, "查询 Docker 本地镜像失败：%s" % exc
+        self.local_images_checked = True
+        selected_refs = {row[0] for row in self.db.query(models.UserImagePreset.image_ref).filter_by(
+            user_id=self.user.id).all()}
+        lines = []
+        for image in local_images:
+            refs = [ref for ref in (image.tags or []) if ref and ref != "<none>:<none>"]
+            if not refs:
+                refs = [image.id]
+            size = image.attrs.get("Size")
+            for ref in refs:
+                lines.append("- image_ref=%s image_id=%s size_bytes=%s preset_selected=%s" % (
+                    ref, image.id[:19], size if size is not None else "未知",
+                    str(ref in selected_refs).lower()))
+        return True, "\n".join(lines) if lines else "（Docker 本地没有镜像）"
+
+    def _tool_inspect_image(self, inp) -> Tuple[bool, str]:
+        image_ref = inp.get("image_ref")
+        if image_ref is None:
+            try:
+                image_id = int(inp["image_id"])
+            except (KeyError, TypeError, ValueError):
+                return False, "请提供 list_local_images 中的 image_ref 或 list_images 中的预设 image_id"
+            image = container_crud.get_image_by_id(self.db, image_id)
+            if image is None:
+                return False, "预设镜像不存在"
+            image_ref = image.image
+        elif not isinstance(image_ref, str) or not image_ref.strip():
+            return False, "请提供有效的本地镜像 image_ref"
+        try:
+            report = inspect_local_image(image_ref)
+        except (ValueError, RuntimeError) as exc:
+            return False, str(exc)
+        return True, json.dumps(report, ensure_ascii=False)
+
+    def _tool_search_hub_images(self, inp) -> Tuple[bool, str]:
+        if self.user.role != "admin":
+            return False, "仅管理员可以搜索和拉取 Docker Hub 镜像"
+        if not self.local_images_checked:
+            return False, "请先调用 list_local_images 查找 Docker 本地全部镜像，并检查可能符合需求的镜像；本地无合适候选时再搜索 Docker Hub"
+        try:
+            results = search_images(self.user.id, inp.get("query"))
+        except (ValueError, RuntimeError) as exc:
+            return False, str(exc)
+        if not results:
+            return True, "Docker Hub 没有找到匹配的公开镜像，请调整关键词"
+        lines = []
+        for row in results:
+            lines.append("- %s | %s | 官方=%s | Stars=%s | 标签=%s" % (
+                row["name"], row["description"][:300], row["official"],
+                row["stars"], ", ".join(row["refs"])))
+        return True, "\n".join(lines)
+
+    def _tool_pull_hub_image(self, inp) -> Tuple[bool, str]:
+        if self.user.role != "admin":
+            return False, "仅管理员可以搜索和拉取 Docker Hub 镜像"
+        try:
+            image_ref = inp.get("image_ref", "")
+            if not self.user_message or image_ref not in self.user_message:
+                return False, "请管理员在当前消息中明确写出所选镜像的完整名称和标签，再开始拉取"
+            job_id = start_pull(self.user.id, image_ref, self.turn_started_at)
+        except (ValueError, RuntimeError) as exc:
+            return False, str(exc)
+        return True, "拉取任务已启动 image=%s job_id=%s；请等待前端显示进度和最终状态" % (image_ref, job_id)
+
+    def _tool_delete_local_image(self, inp) -> Tuple[bool, str]:
+        if self.user.role != "admin":
+            return False, "仅管理员可以删除本地镜像"
+        image_ref = inp.get("image_ref")
+        if image_ref is not None:
+            if not isinstance(image_ref, str) or not image_ref.strip():
+                return False, "请提供完整 image_ref"
+            sync_local_image_presets(self.db, docker_runner.client)
+            image = self.db.query(models.GpuImage).filter_by(image=image_ref).first()
+        else:
+            try:
+                image_id = int(inp["image_id"])
+            except (KeyError, TypeError, ValueError):
+                return False, "请提供 list_local_images 中的 image_ref 或有效预设 image_id"
+            image = container_crud.get_image_by_id(self.db, image_id)
+        if image is None:
+            return False, "镜像目录中不存在该镜像，请先查询本地镜像"
+        if not self.user_message or image.image not in self.user_message:
+            return False, "请管理员在当前消息中明确写出要删除的完整镜像名称和标签"
+        try:
+            result = containers_router._delete_local_image_impl(image.id, self.db)
+            return True, result["message"]
+        except HTTPException as exc:
+            return False, exc.detail
 
     def _tool_check_gpu_quota(self, inp) -> Tuple[bool, str]:
         """配额检查：总配额 / 已用 / 剩余可申请，管理员无配额限制。
@@ -394,7 +556,7 @@ class ToolExecutor:
 
         镜像 /api/admin/users/{user_id} DELETE + crud.delete_user 的语义：先对该用户
         名下每条 ContainerInstance 记录 stop/remove 对应 docker 容器本体，再清库——
-        容器记录、GPU 分配、其创建的镜像、账号全部删除，剩余用户 id 随之重排。
+        容器记录、GPU 分配、个人镜像预设、账号全部删除，剩余用户 id 随之重排。
         只清容器与数据库，绝不删宿主机工作区目录（CONTAINER_MOUNT_ROOT/gpu-<username>
         由容器启动时创建、删除用户不动它，同名新用户可复用该工作区）。
         管理员账号不可作删除目标（本工具作用对象与 list_users / User management 一致，
@@ -421,7 +583,7 @@ class ToolExecutor:
         if not user_crud.delete_user(self.db, target.id):
             return False, f"删除失败：{deleted}"
         return True, (f"已删除用户 {deleted}：其容器已停止/移除，容器记录、GPU 分配、"
-                      f"其创建的镜像及账号信息均已清除；宿主机工作区目录已保留。")
+                      f"个人镜像预设及账号信息均已清除；宿主机工作区目录已保留。")
 
     def _tool_set_container_protection(self, inp) -> Tuple[bool, str]:
         inst = container_crud.get_container_instance(self.db, int(inp["id"]))
@@ -440,7 +602,11 @@ class ToolExecutor:
             return block
         try:
             result = containers_router._start_stopped_container_impl(int(inp["id"]), self.user, self.db, "llm")
-            return True, result.get("message", "started")
+            inst = container_crud.get_container_instance(self.db, int(inp["id"]))
+            return True, (f"容器已启动 id={inst.id} image={inst.image} "
+                          f"ssh_user={inst.ssh_username or '未确认'}"
+                          f"{_access_address(inst.assigned_port)}；"
+                          "请到容器列表核对状态并复制访问密码")
         except HTTPException as e:
             return False, e.detail
 
@@ -465,6 +631,7 @@ class ToolExecutor:
         try:
             resp = containers_router._rebuild_container_impl(int(inp["id"]), self.user, self.db, "llm")
             return True, (f"容器已重建 id={resp.id} status={resp.status}"
+                          f" ssh_user={resp.ssh_username or '未确认'}"
                           f"{_access_address(resp.assigned_port)}")
         except HTTPException as e:
             return False, e.detail
@@ -473,10 +640,30 @@ class ToolExecutor:
         block = self._admin_mutation_block()
         if block:
             return block
+        requested = requested_gpu_count(self.user_message)
+        raw_count = inp.get("gpu_count")
+        if requested == 0 or zero_gpu_count(raw_count):
+            try:
+                image_id = int(inp["image_id"])
+            except (KeyError, TypeError, ValueError):
+                image_id = None
+            image = container_crud.get_image_by_id(self.db, image_id) if image_id is not None else None
+            return False, zero_gpu_reply(image.min_gpu if image else None)
+        if raw_count is not None and (isinstance(raw_count, bool) or not isinstance(raw_count, int)):
+            return False, REJECTION_PREFIX + "工具提供的 GPU 数量无效；未创建容器。"
+        supplied = (requested if requested is not None else 1) if raw_count is None else raw_count
+        if requested is not None and supplied != requested:
+            return False, (REJECTION_PREFIX + "用户要求 %s 张 GPU，但工具参数为 %s；"
+                    "不能擅自更改，未创建容器。" % (requested, inp["gpu_count"]))
+        if self.user_message is not None and requested is None:
+            supplied = 1
+        if supplied < 1 or supplied > 4:
+            return False, (REJECTION_PREFIX + "GPU 数量须为 1 至 4 张；用户要求 %s 张，"
+                    "未创建容器。" % supplied)
         try:
             req = schemas.ContainerStartRequest(
                 image_id=int(inp["image_id"]),
-                gpu_count=int(inp.get("gpu_count", 1)),
+                gpu_count=supplied,
                 cpu_limit=inp.get("cpu_limit"),
                 memory_limit=inp.get("memory_limit"),
                 env_vars=inp.get("env_vars") or {},
@@ -484,12 +671,26 @@ class ToolExecutor:
             resp = containers_router._start_container_impl(req, self.user, self.db, "llm")
             # 访问密码属于敏感信息：不落在 agent 回复/聊天历史/工具回执里，引导去容器列表页查看。
             return True, (f"容器已创建 id={resp.id} image={resp.image} status={resp.status} "
+                          f"ssh_user={resp.ssh_username or '未确认'} "
                           f"{_access_address(resp.assigned_port)}；访问密码不会在此展示，"
                           f"请到『容器列表/详情』页点击复制")
         except HTTPException as e:
+            if isinstance(e.detail, str) and e.detail.startswith("镜像预设最低需要"):
+                return False, REJECTION_PREFIX + e.detail + "；未创建容器。"
             return False, e.detail
-        except ValidationError as e:
-            return False, str(e)
+        except ValidationError:
+            return False, REJECTION_PREFIX + "创建参数未通过校验；未创建容器。"
+
+    def _tool_repair_container_ssh(self, inp) -> Tuple[bool, str]:
+        try:
+            result = containers_router._repair_container_ssh_impl(
+                int(inp["id"]), self.user, self.db, "llm")
+            return True, (f"容器 id={inp['id']} SSH 登录已修复 "
+                          f"ssh_user={result['ssh_username']}"
+                          f"{_access_address(result['assigned_port'])}；"
+                          "请到容器列表复制访问密码")
+        except HTTPException as exc:
+            return False, exc.detail
 
 
 class ToolCatalog:
@@ -502,8 +703,10 @@ class ToolCatalog:
     不跨请求持久化 —— schema 从不写入聊天历史，不会随会话累积。
     """
 
-    def __init__(self) -> None:
-        self._full: Dict[str, Dict] = {t["name"]: t for t in TOOLS}
+    def __init__(self, excluded=None) -> None:
+        excluded = excluded or set()
+        self._full: Dict[str, Dict] = {t["name"]: t for t in TOOLS
+                                       if t["name"] not in excluded}
         self._summaries: Dict[str, str] = TOOL_SUMMARIES
 
     def __contains__(self, name: str) -> bool:
@@ -526,3 +729,6 @@ class ToolCatalog:
 
 
 CATALOG = ToolCatalog()
+ADMIN_ONLY_TOOLS = {"search_hub_images", "pull_hub_image", "delete_local_image",
+                    "set_user_quota", "list_users", "delete_user"}
+USER_CATALOG = ToolCatalog(excluded=ADMIN_ONLY_TOOLS)

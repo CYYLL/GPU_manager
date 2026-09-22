@@ -132,6 +132,22 @@ def test_list_containers_heals_stopped_instance_that_is_running_in_docker(
     assert len(_active_alloc(db, inst.id)) == 1
 
 
+def test_list_does_not_mark_running_container_stopped_when_docker_is_unavailable(
+    db, test_user, docker_mock
+):
+    inst = _make_instance(db, test_user.id, status="running")
+    db.add(models.GpuAllocation(gpu_id=0, container_instance_id=inst.id, user_id=test_user.id))
+    db.commit()
+    docker_mock.is_container_running.return_value = None
+
+    result = containers_router.list_containers(test_user, db)
+
+    assert result[0].status == "running"
+    db.refresh(inst)
+    assert inst.status == "running"
+    assert len(_active_alloc(db, inst.id)) == 1
+
+
 # ── 3. Start heals an already-running container instead of failing ───────────
 
 

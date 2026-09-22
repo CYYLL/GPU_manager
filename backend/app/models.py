@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Float, Text, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Float, Text, JSON, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from passlib.context import CryptContext
@@ -40,6 +40,28 @@ class GpuImage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class HiddenLocalImage(Base):
+    __tablename__ = "hidden_local_images"
+
+    id = Column(Integer, primary_key=True)
+    image = Column(String, unique=True, nullable=False, index=True)
+
+
+class UserImagePreset(Base):
+    __tablename__ = "user_image_presets"
+    __table_args__ = (UniqueConstraint("user_id", "image_ref"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    image_ref = Column(String, nullable=False)
+
+
+class PresetMigration(Base):
+    __tablename__ = "preset_migrations"
+
+    key = Column(String, primary_key=True)
+
+
 class ContainerInstance(Base):
     __tablename__ = "container_instances"
 
@@ -54,6 +76,7 @@ class ContainerInstance(Base):
     memory_limit = Column(Integer, nullable=True)  # memory limit in MB
     assigned_port = Column(Integer, nullable=True)  # host port (22000-22999)
     access_password = Column(String, nullable=True)  # container access password
+    ssh_username = Column(String(64), nullable=True)  # verified container login user
     created_at = Column(DateTime, default=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     stopped_at = Column(DateTime, nullable=True)

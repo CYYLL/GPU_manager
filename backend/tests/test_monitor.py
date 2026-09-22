@@ -64,6 +64,22 @@ def test_sample_writes_snapshot_and_detects_external_stop(monkeypatch, db):
     assert alloc.released_at is not None
 
 
+def test_monitor_does_not_stop_container_when_docker_state_is_unknown(monkeypatch, db):
+    u = _mk_user(db)
+    inst = _mk_inst(db, u)
+    db.add(models.GpuAllocation(gpu_id=0, container_instance_id=inst.id, user_id=u.id))
+    db.commit()
+    stub = type("DR", (), {"is_container_running": lambda self, cid: None})()
+    monkeypatch.setattr(mon, "shutil", type("S", (), {
+        "disk_usage": lambda p: type("U", (), {"total": 100, "used": 50, "free": 50})()})())
+
+    assert mon.sample_once(db, stub) == 0
+    db.refresh(inst)
+    assert inst.status == "running"
+    assert db.query(models.GpuAllocation).filter_by(container_instance_id=inst.id,
+                                                   released_at=None).count() == 1
+
+
 def test_retention_prune(monkeypatch, db):
     # retention cap is read from env (default 200) — pin it small so the test
     # actually exercises the per-user chat-history trim

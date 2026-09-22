@@ -2,6 +2,7 @@ import os
 import docker
 from docker.types import DeviceRequest, Mount
 from typing import List, Dict, Optional, Tuple
+from .ssh_access import configure_ssh_login
 import time
 
 class DockerRunner:
@@ -26,10 +27,10 @@ class DockerRunner:
         ports: Optional[Dict] = None,
         volumes: Optional[List[Mount]] = None,
         ssh_password: Optional[str] = None,
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, Optional[str]]:
         """
         Start a Docker container with GPU access and resource limits.
-        Returns (container_id, status).
+        Returns (container_id, status, verified SSH username).
         Raises Exception on failure.
         Supported images:
            ✓ Ubuntu-based images with Python installed
@@ -99,132 +100,41 @@ class DockerRunner:
                     f"Container startup timeout. status={container.status}"
                 )
 
-            # Setup SSH access with password
+            # An allocated container must have a verified SSH login before it is recorded.
+            ssh_username = None
             if ssh_password:
-                ssh_ok, ssh_msg = self.setup_ssh(container.id, ssh_password)
+                ssh_ok, ssh_username, ssh_msg = self.setup_ssh(container.id, ssh_password)
                 if not ssh_ok:
-                    print(f"SSH setup warning for {container.id[:12]}: {ssh_msg}")
-            return container.id, container.status
+                    container.remove(force=True)
+                    raise RuntimeError(f"容器 SSH 初始化失败：{ssh_msg}")
+            container.reload()
+            if container.status != "running":
+                container.remove(force=True)
+                raise RuntimeError("容器初始化后未保持运行，创建失败")
+            return container.id, container.status, ssh_username
 
         except docker.errors.ImageNotFound:
             raise Exception(f"Docker image '{image}' not found. Try pulling it first.")
         except docker.errors.APIError as e:
             raise Exception(f"Docker API error: {str(e)}")
 
-    def setup_ssh(self, container_id: str, password: str) -> Tuple[bool, str]:
-        """Configure SSH inside container: set root password and start SSH service."""
+    def setup_ssh(self, container_id: str, password: str,
+                  preferred_username: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
+        """Select root only when password login is allowed; otherwise create a user."""
         if not self.client:
-            return False, "Docker client not initialized"
+            return False, None, "Docker client not initialized"
         try:
             container = self.client.containers.get(container_id)
-
-            # Wait for container to be ready for exec
             for attempt in range(30):
-                try:
-                    code, _ = container.exec_run("true", user="root")
-                    if code == 0:
-                        break
-                except Exception:
-                    pass
-                if attempt == 29:
-                    return False, "Container not ready for exec"
-                time.sleep(1)
-
-            # Shell detection
-            shell = "bash"
-            code, _ = container.exec_run("which bash", user="root")
-            if code != 0:
-                shell = "sh"
-
-            def _set_pw(pw: str) -> bool:
-                """Set root password by writing a SHA512 hash directly to shadow."""
-                import crypt as crypt_mod, base64
-                salt = crypt_mod.mksalt(crypt_mod.METHOD_SHA512)
-                pw_hash = crypt_mod.crypt(pw, salt)
-                # Encode hash in base64 to avoid shell interpretation issues
-                b64 = base64.b64encode(pw_hash.encode()).decode()
-                code, _ = container.exec_run(
-                    f'python3 -c "import re,base64; '
-                    f'h=base64.b64decode(\'{b64}\').decode(); '
-                    f'c=open(\'/etc/shadow\').read(); '
-                    f'c=re.sub(\'^root:[^:]*\',\'root:\'+h,c,flags=re.MULTILINE); '
-                    f'open(\'/etc/shadow\',\'w\').write(c)"',
-                    user="root"
-                )
-                return code == 0
-
-            def _verify_pw(pw: str) -> bool:
-                """Verify password by checking shadow hash with crypt."""
-                import crypt as crypt_mod
-                code, out = container.exec_run(
-                    'python3 -c "import re; print([l.split(\':\')[1] for l in open(\'/etc/shadow\') if l.startswith(\'root:\')][0])"',
-                    user="root"
-                )
-                if code != 0:
-                    return False
-                stored = out.decode().strip()
-                return crypt_mod.crypt(pw, stored) == stored
-
-            # 1. Configure SSH
-            for sed_cmd in [
-                'sed -i "s/.*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config',
-                'sed -i "s/.*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config',
-                'sed -i "s/.*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/" /etc/ssh/sshd_config',
-            ]:
-                container.exec_run(f'{shell} -c \'{sed_cmd} 2>/dev/null\'', user="root")
-
-            # 2. Start SSH via any available method
-            ssh_started = False
-            for cmd in [
-                "service ssh start",
-                "service sshd start",
-                "/etc/init.d/ssh start",
-                "/etc/init.d/sshd start",
-            ]:
-                code, _ = container.exec_run(cmd, user="root")
+                code, _ = container.exec_run(["true"], user="root")
                 if code == 0:
-                    ssh_started = True
                     break
-
-            if not ssh_started:
-                # Try installing openssh-server
-                code, _ = container.exec_run(
-                    f'{shell} -c \'DEBIAN_FRONTEND=noninteractive apt-get update -qq && '
-                    f'apt-get install -y -qq openssh-server >/dev/null 2>&1 && '
-                    f'service ssh start\'',
-                    user="root",
-                )
-                if code == 0:
-                    ssh_started = True
-
-            # 3. Set password immediately
-            _set_pw(password)
-
-            # 4. Wait for container CMD init to finish, then verify and re-set
-            time.sleep(10)
-            if not _verify_pw(password):
-                # Container init may have reset the password, set it again
-                _set_pw(password)
-                time.sleep(5)
-                if not _verify_pw(password):
-                    # Last resort: directly write shadow
-                    import subprocess
-                    h = subprocess.check_output(
-                        ['openssl', 'passwd', '-6', password]
-                    ).decode().strip()
-                    container.exec_run(
-                        f'{shell} -c "'
-                        f'cp /etc/shadow /etc/shadow.bak && '
-                        f'sed \"s|^root:[^:]*|root:{h}|\" /etc/shadow.bak > /etc/shadow && '
-                        f'rm /etc/shadow.bak"',
-                        user="root"
-                    )
-
-            if ssh_started:
-                return True, "SSH ready"
-            return False, "SSH not available (tried install, may not be Debian/Ubuntu)"
-        except Exception as e:
-            return False, f"SSH setup error: {str(e)}"
+                if attempt == 29:
+                    return False, None, "容器尚未准备好执行命令"
+                time.sleep(1)
+            return configure_ssh_login(container, password, preferred_username)
+        except Exception as exc:
+            return False, None, f"SSH 初始化异常：{exc}"
 
     def stop_container(self, container_id: str, attempts=None, timeout=None, retry_delay=None) -> Tuple[bool, str]:
         """Stop a container but do NOT remove it. On failure, retries up to
@@ -255,81 +165,35 @@ class DockerRunner:
                     time.sleep(retry_delay * (i + 1))
         return False, f"Error stopping container after {attempts} attempts: {last_err}"
 
-    def ensure_ssh(self, container_id: str) -> Tuple[bool, str]:
-        """Start SSH service in an existing (restarted) container whose password is already set.
-        Skips password setup and long waits — container filesystem is preserved across stop/start."""
-        if not self.client:
-            return False, "Docker client not initialized"
-        try:
-            container = self.client.containers.get(container_id)
+    def ensure_ssh(self, container_id: str, password: str,
+                   preferred_username: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
+        """Recheck SSH after a container restart or repair an older container."""
+        return self.setup_ssh(container_id, password, preferred_username)
 
-            # Wait for container to be ready for exec
-            for attempt in range(30):
-                try:
-                    code, _ = container.exec_run("true", user="root")
-                    if code == 0:
-                        break
-                except Exception:
-                    pass
-                if attempt == 29:
-                    return False, "Container not ready for exec"
-                time.sleep(1)
-
-            # Shell detection
-            shell = "bash"
-            code, _ = container.exec_run("which bash", user="root")
-            if code != 0:
-                shell = "sh"
-
-            # Ensure SSH config (safe to re-run, sshd_config persists across stop/start)
-            for sed_cmd in [
-                'sed -i "s/.*PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config',
-                'sed -i "s/.*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config',
-                'sed -i "s/.*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/" /etc/ssh/sshd_config',
-            ]:
-                container.exec_run(f'{shell} -c \'{sed_cmd} 2>/dev/null\'', user="root")
-
-            # Start SSH via any available method
-            for cmd in [
-                "service ssh start",
-                "service sshd start",
-                "/etc/init.d/ssh start",
-                "/etc/init.d/sshd start",
-            ]:
-                code, _ = container.exec_run(cmd, user="root")
-                if code == 0:
-                    return True, "SSH started"
-
-            # Try installing openssh-server as fallback
-            code, _ = container.exec_run(
-                f'{shell} -c \'DEBIAN_FRONTEND=noninteractive apt-get update -qq && '
-                f'apt-get install -y -qq openssh-server >/dev/null 2>&1 && '
-                f'service ssh start\'',
-                user="root",
-            )
-            if code == 0:
-                return True, "SSH installed and started"
-
-            return False, "SSH not available"
-        except Exception as e:
-            return False, f"SSH start error: {str(e)}"
-
-    def start_container_by_id(self, container_id: str, ssh_password: Optional[str] = None) -> Tuple[bool, str]:
-        """Start an existing stopped container and ensure SSH is running.
-        Does NOT re-set the password — container filesystem (including /etc/shadow) is preserved.
-        Returns (success, message)."""
+    def start_container_by_id(self, container_id: str, ssh_password: Optional[str] = None,
+                              ssh_username: Optional[str] = None) -> Tuple[bool, str]:
         if not self.client:
             return False, "Docker client not initialized"
         try:
             container = self.client.containers.get(container_id)
             container.start()
             if ssh_password:
-                self.ensure_ssh(container.id)
+                ok, username, reason = self.ensure_ssh(container.id, ssh_password, ssh_username)
+                if not ok:
+                    container.stop(timeout=10)
+                    return False, reason
+                container.reload()
+                if container.status != "running":
+                    return False, "容器启动后未保持运行"
+                return True, username or "root"
+            container.reload()
+            if container.status != "running":
+                return False, "容器启动后未保持运行"
             return True, "running"
         except docker.errors.NotFound:
             return False, "Container not found in Docker"
-        except Exception as e:
-            return False, f"Error starting container: {str(e)}"
+        except Exception as exc:
+            return False, f"Error starting container: {exc}"
 
     def list_containers(self, all: bool = True) -> List[Dict]:
         """List all Docker containers."""
@@ -346,18 +210,22 @@ class DockerRunner:
             })
         return result
 
-    def is_container_running(self, container_id: str) -> bool:
-        """Check if a container is currently running."""
+    def is_container_running(self, container_id: str) -> Optional[bool]:
+        """Return None when Docker cannot determine the state."""
         if not self.client:
-            return False
+            return None
         try:
             container = self.client.containers.get(container_id)
-            return container.status == "running"
+            if container.status == "running":
+                return True
+            if container.status in ("exited", "dead"):
+                return False
+            return None
         except docker.errors.NotFound:
             return False
         except Exception as e:
             print(f"Error checking container status: {e}")
-            return False
+            return None
 
     def remove_container(self, container_id: str) -> Tuple[bool, str]:
         """Gracefully stop then remove a Docker container. Stop is retried via

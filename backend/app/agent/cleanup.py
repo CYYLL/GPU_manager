@@ -23,14 +23,32 @@ llm_client = None
 
 # ── docker reclaim measurement (pure) ───────────────────────────────────────
 
+def _docker_id(entry: dict) -> str:
+    """Docker Engine uses Id; accept ID from older test/mocked payloads too."""
+    return entry.get("Id") or entry.get("ID") or ""
+
+
+def _is_stopped(entry: dict) -> bool:
+    state = entry.get("State")
+    if state is not None:
+        return state in ("created", "exited", "dead")
+    # Some callers supply the older boolean shape. Unknown state is not
+    # counted as reclaimable, avoiding a false cleanup trigger.
+    return entry.get("Running") is False
+
+
+def _is_dangling(image: dict) -> bool:
+    tags = image.get("RepoTags") or []
+    return not tags or tags == ["<none>:<none>"]
+
 def reclaim_breakdown(df: dict) -> Tuple[int, int, int]:
     """(stopped-container writable bytes, dangling-image bytes, build-cache bytes)
     from a `client.df()` payload. Running containers contribute nothing."""
     containers = df.get("Containers") or []
     images = df.get("Images") or []
     builds = df.get("BuildCache") or []
-    ctr = sum(c.get("SizeRw") or 0 for c in containers if not c.get("Running"))
-    img = sum(i.get("SizeRootFs") or i.get("Size") or 0 for i in images if not i.get("RepoTags"))
+    ctr = sum(c.get("SizeRw") or 0 for c in containers if _is_stopped(c))
+    img = sum(i.get("SizeRootFs") or i.get("Size") or 0 for i in images if _is_dangling(i))
     bc = sum(b.get("Size") or 0 for b in builds)
     return ctr, img, bc
 
@@ -41,7 +59,7 @@ def per_container_estimate(df: dict, container_id: str) -> int:
     df container references it). Immune to concurrent /amax writes by design."""
     entry = None
     for c in df.get("Containers") or []:
-        if c.get("ID") == container_id or c.get("ID", "").startswith(container_id[:12]):
+        if _docker_id(c) == container_id or _docker_id(c).startswith(container_id[:12]):
             entry = c
             break
     if entry is None:
@@ -54,7 +72,7 @@ def per_container_estimate(df: dict, container_id: str) -> int:
     if others:
         return rw  # image still in use elsewhere
     for i in df.get("Images") or []:
-        if i.get("ID") == image_id:
+        if _docker_id(i) == image_id and _is_dangling(i):
             return rw + (i.get("SizeRootFs") or i.get("Size") or 0)
     return rw
 
@@ -407,8 +425,10 @@ def run_cleanup_cycle(runner=None, db=None, llm_client=None) -> dict:
                 _log(db, cid, inst.user_id if inst else None, "skip", reason, decision_source)
                 continue
             inst = crud.get_container_instance(db, cid)
-            if runner.is_container_running(inst.container_id):
-                _log(db, cid, inst.user_id, "skip", "docker container running", decision_source)
+            docker_running = runner.is_container_running(inst.container_id)
+            if docker_running is not False:
+                reason = "docker container running" if docker_running else "docker state unknown"
+                _log(db, cid, inst.user_id, "skip", reason, decision_source)
                 continue
             est = per_container_estimate(df, inst.container_id)  # source-level, pre-removal
             if p.dry_run:

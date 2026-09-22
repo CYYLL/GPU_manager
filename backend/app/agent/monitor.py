@@ -62,7 +62,7 @@ def sample_once(db: Session, docker_runner) -> int:
         models.ContainerInstance.status == "running").all()
     external_stops = 0
     for inst in running:
-        if not docker_runner.is_container_running(inst.container_id):
+        if docker_runner.is_container_running(inst.container_id) is False:
             crud.release_allocations_by_container(db, inst.id)
             crud.stop_container_instance(db, inst.id)
             crud.record_container_event(db, inst.id, inst.user_id, "external_stop", "agent")

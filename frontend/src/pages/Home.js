@@ -70,9 +70,9 @@ const Home = () => {
             <div className="guide-item">
               <span className="guide-icon">⚙️</span>
               <div>
-                <strong>Admin</strong>
-                <p className="guide-en">Manage users (GPU quotas, containers, delete users), manage preset Docker images (add/delete), and view the container mount root path.</p>
-                <p className="guide-zh">管理用户（GPU 配额、容器、删除用户）、管理预置 Docker 镜像（添加/删除）、查看容器挂载根目录。</p>
+                <strong>Users / Images / Cleanup</strong>
+                <p className="guide-en">Use Users for accounts and GPU quotas, Images for Docker presets, and Cleanup for disk and cleanup status.</p>
+                <p className="guide-zh">通过 Users 管理账号与 GPU 配额，Images 管理 Docker 镜像预设，Cleanup 查看磁盘与清理状态。</p>
               </div>
             </div>
           )}

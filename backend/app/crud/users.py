@@ -83,13 +83,21 @@ def delete_user(db: Session, user_id: int) -> bool:
     db.query(models.ContainerInstance).filter(
         models.ContainerInstance.user_id == user_id
     ).delete()
-    # Delete gpu_images created by this user
+    # Catalog entries are shared; deleting one user must not remove another
+    # user's image choices or the locally available image metadata.
     db.query(models.GpuImage).filter(
         models.GpuImage.created_by == user_id
+    ).update({"created_by": None})
+    db.query(models.UserImagePreset).filter(
+        models.UserImagePreset.user_id == user_id
     ).delete()
     # Delete the user
     db.delete(user)
     db.commit()
+
+    # Removing a user's presets must also leave the visible image IDs contiguous.
+    from .containers import renumber_image_ids
+    renumber_image_ids(db)
 
     # Renumber remaining users sequentially
     remaining = db.query(models.User).order_by(models.User.id).all()
@@ -107,6 +115,9 @@ def delete_user(db: Session, user_id: int) -> bool:
         db.query(models.GpuImage).filter(
             models.GpuImage.created_by == old_id
         ).update({"created_by": new_id})
+        db.query(models.UserImagePreset).filter(
+            models.UserImagePreset.user_id == old_id
+        ).update({"user_id": new_id})
         # Update user ID
         db.query(models.User).filter(models.User.id == old_id).update({"id": new_id})
 

@@ -1,6 +1,7 @@
 """Mutating tools delegate to lifecycle handlers; ownership + errors mapped."""
 from unittest import mock
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -9,6 +10,7 @@ from app.database import Base
 from app import models
 from app.agent import tools as agent_tools
 from app import schemas
+from pydantic import ValidationError
 
 
 @pytest.fixture()
@@ -90,6 +92,102 @@ def test_tools_list_has_mutating_schemas():
     assert {"create_container", "start_container", "stop_container", "delete_container", "list_images"} <= names
     by_name = {t["name"]: t for t in agent_tools.TOOLS}
     assert by_name["stop_container"]["input_schema"]["required"] == ["id"]
+    assert by_name["create_container"]["input_schema"]["required"] == ["image_id"]
+
+
+@pytest.mark.parametrize("message,payload", [
+    ("创建一个 0 张 GPU 的容器", {"image_id": 1}),
+    ("创建一个 0 张 GPU 的容器", {"image_id": 1, "gpu_count": 1}),
+    ("创建一个 2 张 GPU 的容器", {"image_id": 1, "gpu_count": 1}),
+    ("创建一个 1 张 GPU 的容器", {"image_id": 1, "gpu_count": 1.5}),
+    ("创建一个 5 张 GPU 的容器", {"image_id": 1}),
+])
+def test_create_tool_never_substitutes_gpu_count(monkeypatch, db, message, payload):
+    from app.routers import containers as containers_router
+    start = mock.Mock()
+    monkeypatch.setattr(containers_router, "_start_container_impl", start)
+    ex = agent_tools.ToolExecutor(db, _mk_user(db))
+    ex.user_message = message
+
+    ok, result = ex.run("create_container", payload)
+
+    assert not ok and "未创建容器" in result
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize("message,payload,expected", [
+    ("创建一个容器", {"image_id": 1}, 1),
+    ("创建一个容器", {"image_id": 1, "gpu_count": 2}, 1),
+    ("创建一个 2 张 GPU 的容器", {"image_id": 1}, 2),
+    ("创建一个 2 张 GPU 的容器", {"image_id": 1, "gpu_count": 2}, 2),
+    ("创建一个两张GPU的容器", {"image_id": 1}, 2),
+])
+def test_create_tool_uses_default_or_explicit_gpu_count(monkeypatch, db, message, payload, expected):
+    from app.routers import containers as containers_router
+    start = mock.Mock(return_value=mock.Mock(
+        id=3, image="basic:v1", status="running", ssh_username="root", assigned_port=None))
+    monkeypatch.setattr(containers_router, "_start_container_impl", start)
+    ex = agent_tools.ToolExecutor(db, _mk_user(db))
+    ex.user_message = message
+
+    ok, result = ex.run("create_container", payload)
+
+    assert ok and "容器已创建" in result
+    assert start.call_args.args[0].gpu_count == expected
+
+
+def test_container_request_defaults_to_one_and_rejects_zero():
+    assert schemas.ContainerStartRequest(image_id=1).gpu_count == 1
+    with pytest.raises(ValidationError):
+        schemas.ContainerStartRequest(image_id=1, gpu_count=0)
+
+
+def test_create_tool_reports_image_minimum_only_when_validation_fails(monkeypatch, db):
+    from app.routers import containers as containers_router
+    start = mock.Mock(side_effect=HTTPException(
+        status_code=400, detail="镜像预设最低需要 2 张 GPU，当前请求 1 张"))
+    monkeypatch.setattr(containers_router, "_start_container_impl", start)
+    ex = agent_tools.ToolExecutor(db, _mk_user(db))
+    ex.user_message = "创建一个容器"
+
+    ok, result = ex.run("create_container", {"image_id": 1})
+
+    assert not ok and "最低需要 2 张 GPU" in result and "未创建容器" in result
+    assert start.call_args.args[0].gpu_count == 1
+
+
+def test_llm_repairs_container_ssh_and_records_username(monkeypatch, db):
+    from app.routers import containers as containers_router
+    owner = _mk_user(db)
+    instance = _mk_inst(db, owner)
+    instance.access_password = "secret"
+    db.commit()
+    runner = mock.Mock()
+    runner.is_container_running.return_value = True
+    runner.setup_ssh.return_value = (True, "gpuuser", "SSH 登录已就绪")
+    monkeypatch.setattr(containers_router, "docker_runner", runner)
+
+    ok, result = agent_tools.ToolExecutor(db, owner).run(
+        "repair_container_ssh", {"id": instance.id})
+
+    assert ok and "ssh_user=gpuuser" in result
+    assert db.get(models.ContainerInstance, instance.id).ssh_username == "gpuuser"
+    runner.setup_ssh.assert_called_once_with(instance.container_id, "secret", None)
+
+
+def test_other_user_cannot_repair_container_ssh(monkeypatch, db):
+    from app.routers import containers as containers_router
+    owner = _mk_user(db)
+    other = _mk_user(db, "other")
+    instance = _mk_inst(db, owner)
+    runner = mock.Mock()
+    monkeypatch.setattr(containers_router, "docker_runner", runner)
+
+    ok, result = agent_tools.ToolExecutor(db, other).run(
+        "repair_container_ssh", {"id": instance.id})
+
+    assert not ok and "无权" in result
+    runner.setup_ssh.assert_not_called()
 
 
 # ── 管理员只允许 stop/delete：create/start/rebuild 一律拒绝 ──────────────────
@@ -168,12 +266,14 @@ def test_create_container_output_does_not_leak_password(monkeypatch, db, tmp_pat
     db.add(im)
     db.commit()
     db.refresh(im)
+    db.add(models.UserImagePreset(user_id=u.id, image_ref=im.image))
+    db.commit()
 
     # isolated workspace mount root so the impl never writes to the real /amax tree
     monkeypatch.setenv("CONTAINER_MOUNT_ROOT", str(tmp_path))
     # docker_runner.start_container returns a fake docker id + running status
     stub = mock.Mock()
-    stub.start_container.return_value = ("d" * 64, "running")
+    stub.start_container.return_value = ("d" * 64, "running", "root")
     monkeypatch.setattr(containers_router, "docker_runner", stub)
     # idle GPUs: availability + busy-GPU checks pass for a single GPU
     monkeypatch.setattr(containers_router.gpu_monitor, "get_gpu_count", lambda: 1)

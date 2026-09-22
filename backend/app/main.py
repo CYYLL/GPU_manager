@@ -40,11 +40,17 @@ def _configure_logging():
 _configure_logging()
 
 from .database import engine, Base
+from sqlalchemy import inspect, text
 from .routers import users, gpus, containers, mode, agent, monitor
 from .services.host_ip import get_host_ip
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
+if "ssh_username" not in {column["name"] for column in inspect(engine).get_columns("container_instances")}:
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE container_instances ADD COLUMN ssh_username VARCHAR(64)"))
+from .services.image_presets import migrate_legacy_presets
+migrate_legacy_presets()
 
 app = FastAPI(title="GPU Resource Manager", version="2.0.0")
 
@@ -104,7 +110,7 @@ def cleanup_stale_containers():
 
         cleaned = 0
         for inst in stale:
-            if not docker.is_container_running(inst.container_id):
+            if docker.is_container_running(inst.container_id) is False:
                 db.query(models.GpuAllocation).filter(
                     models.GpuAllocation.container_instance_id == inst.id,
                     models.GpuAllocation.released_at.is_(None)

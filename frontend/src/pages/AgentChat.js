@@ -6,66 +6,26 @@ import { useMode } from '../context/ModeContext';
 import AppHeader from '../components/AppHeader';
 
 let nextId = 1;
-// 模块级标记（同一 SPA 会话内路由切走/切回组件不会重置）：记录"离开 Agent 页时
-// 是否带着一条进行中的请求"。回来时据此判断是否需要与后端对账——只有本页自己
-// 离开前发过中断的请求才算 leftover，避免把别的 tab 正在正常执行的请求误显示为"正在停止"。
+// 页面切换不取消后台请求；返回时用此标记恢复对运行状态的跟踪。
 let leftWhileRunning = false;
 
-// 工具结果默认折叠展示，可展开看全部 —— 有大小上限但不破坏语义：
-// 上限作用于“展示层”，切分只发生在行/词边界，绝不在一个数字/词中间切断；
-// 完整结果始终保存在 chip 里，点“展开”即可看全，因此被折叠的信息没有丢失。
-const COLLAPSED_LINES = 8;      // 折叠时最多展示的行数
-const MAX_PREVIEW_CHARS = 800;  // 折叠预览的总字符上限（超出部分按行/词截断）
-const LEFTOVER_POLL_MS = 1500;  // 回到页面、上一条仍在收尾时，轮询后端 gate 状态的间隔
-
-// 在给定预算内，从「能完整放下多少行」开始，最后一行若放不下则退化到词边界截断。
-function makePreview(lines) {
-  const n = Math.min(lines.length, COLLAPSED_LINES);
-  let budget = MAX_PREVIEW_CHARS;
-  const kept = [];
-  for (let i = 0; i < n; i++) {
-    const line = lines[i];
-    if (line.length <= budget) {
-      kept.push(line);
-      budget -= line.length + 1;  // +1 for the '\n' separator
-      if (budget < 0) break;
-      continue;
-    }
-    // 单行超预算：只在词边界截断，绝不把一个值劈成两半。
-    let cut = line.slice(0, Math.max(budget, 0));
-    const lastSpace = cut.lastIndexOf(' ');
-    if (lastSpace > 0) cut = cut.slice(0, lastSpace);
-    kept.push(cut + ' …');
-    break;
-  }
-  return kept.join('\n');
-}
+const LEFTOVER_POLL_MS = 1500;
 
 function ToolChip({ c }) {
-  const [expanded, setExpanded] = useState(false);
-  const lines = (c.summary || '').split('\n');
-  const preview = makePreview(lines);
-  // 存在比折叠展示更多的内容，或单行被截断 → 需要“展开/收起”
-  const collapsible =
-    expanded || lines.length > COLLAPSED_LINES || preview.length < (c.summary || '').length;
-  const hidden = lines.length - preview.split('\n').length;
   return (
     <div className={`tool-chip tool-${c.status}`}>
       <span className="tool-chip-icon">
         {c.status === 'running' ? '⋯' : c.status === 'ok' ? '✓' : '✗'}
       </span>
       <span className="tool-chip-name">{c.tool}</span>
-      {c.summary && (
-        <span className="tool-chip-summary">{expanded ? lines.join('\n') : preview}</span>
-      )}
-      {collapsible && (
-        <button type="button" className="tool-chip-more" onClick={() => setExpanded((e) => !e)}>
-          {expanded ? '收起' : `展开（${hidden > 0 ? `还有 ${hidden} 行，` : ''}查看全文）`}
-        </button>
-      )}
+      <span>{c.status === 'running' ? '执行中' : c.status === 'ok' ? '成功' : '失败'}</span>
     </div>
   );
 }
+
+const settleRunningChips = (chips) => chips.map((chip) => (
+  chip.status === 'running' ? { ...chip, status: 'fail' } : chip
+));
 
 const AgentChat = () => {
   const { mode, confirmed, loading: modeLoading } = useMode();
@@ -76,7 +36,7 @@ const AgentChat = () => {
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false); // 已点"停止"、等后端返回 请求中断
   const [error, setError] = useState('');
-  const [leftover, setLeftover] = useState(false); // 上一条(离开页时被中断的)请求仍在后端收尾
+  const [leftover, setLeftover] = useState(false); // 离开页面后仍在后台执行的请求
   const listRef = useRef(null);
   // 卸载清理也要知道"此刻是否仍有请求在跑"：state 在清理函数里读不到最新值，用 ref 镜像。
   const sendingRef = useRef(false);
@@ -99,7 +59,11 @@ const AgentChat = () => {
         id: nextId++,
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content || '',
-        chips: [],
+        chips: (m.tool_calls || []).map((call) => ({
+          key: nextId++,
+          tool: call.tool,
+          status: call.ok ? 'ok' : 'fail',
+        })),
         streaming: false,
       }));
       setMessages(rows);
@@ -112,26 +76,16 @@ const AgentChat = () => {
     if (mode === 'llm') loadSession();
   }, [mode, loadSession]);
 
-  // 切换页面（卸载本组件）时，若仍有请求在执行，异步发出中断。与"停止"按钮
-  // 同策略：不断开 SSE，让后端在下一个轮次/回复边界返回 done("请求中断")，
-  // 落库并释放单飞 gate —— 否则请求会在这页无人看管时继续执行到自然结束，
-  // 回来 loadSession 却看不到任何进行中的痕迹（后台在跑、界面没有请求）。
-  // 卸载后回调里对已卸载组件的 setState 是空操作，无副作用。
+  // 页面切换仅记录任务仍在进行，不发送 cancel；只有用户按"停止"才中断。
   useEffect(() => {
     return () => {
       if (sendingRef.current) {
-        leftWhileRunning = true; // 记住本页离开时带着一条进行中的请求，回来要对账
-        api.post('/api/agent/cancel').catch(() => {});
+        leftWhileRunning = true;
       }
     };
   }, []);
 
-  // 回到 Agent 页时与后端对账（仅限"本页离开时发过中断"的场景）：离开时已异步
-  // 发 cancel，但中断要到下一个轮次/回复边界才落定并释放单飞 gate。若用户在收尾
-  // 完成前就返回，会话历史里只有那条用户消息（assistant 的 请求中断 尚未落库），
-  // 直接 loadSession 会误显为"闲置"——正是最初的问题。这里轮询 /api/agent/status：
-  // gate 未释放 → 保持"正在停止…"状态并继续等；gate 释放（_save 先于 release
-  // 执行）→ 重载会话，把落库的 请求中断 收尾回复显示出来，再解除中断中状态。
+  // 回到 Agent 页时查询后台请求；完成后重载已经落库的工具结果和回复。
   useEffect(() => {
     if (mode !== 'llm') return;
     if (!leftWhileRunning) return; // 没有"离开时中断的请求"，直接闲置，无需对账
@@ -144,17 +98,16 @@ const AgentChat = () => {
         const res = await api.get('/api/agent/status');
         running = !!(res.data && res.data.running);
       } catch (err) {
-        // status 端点瞬时失败：按闲置结束轮询，避免卡在中断态或无限请求。
+        // status 端点瞬时失败：按闲置结束轮询，避免无限请求。
       }
       if (disposed) return;
       if (running) {
         setLeftover(true);
         timer = setTimeout(poll, LEFTOVER_POLL_MS);
       } else {
-        // running=false：收尾已落库（_save 先于 gate 释放）。挂载时的 loadSession
-        // 可能抢在落库前返回了旧历史，这里无条件重载一次收敛到最终会话——既覆盖
-        // "恰好卡在收尾完成瞬间"的竞态，也让 请求中断 收尾回复显示出来。
+        // _save 先于 gate 释放；再次加载以覆盖挂载时可能读取的旧历史。
         setLeftover(false);
+        setCancelling(false);
         leftWhileRunning = false;
         loadSession();
       }
@@ -194,10 +147,15 @@ const AgentChat = () => {
       onToolUse: ({ tool }) => {
         patchLastAssistant((a) => ({
           ...a,
-          chips: [...a.chips, { key: nextId++, tool, status: 'running', summary: '' }],
+          chips: [...a.chips, { key: nextId++, tool, status: 'running' }],
         }));
       },
-      onToolResult: ({ tool, ok, result }) => {
+      onToolProgress: ({ tool, percent }) => {
+        if (tool === 'pull_hub_image') {
+          patchLastAssistant((a) => ({ ...a, pullProgress: percent }));
+        }
+      },
+      onToolResult: ({ tool, ok }) => {
         patchLastAssistant((a) => {
           const chips = a.chips.slice();
           // 找到该工具最后一个"执行中"chip 并落定；找不到则补一条
@@ -206,31 +164,24 @@ const AgentChat = () => {
             if (chips[i].tool === tool && chips[i].status === 'running') { idx = i; break; }
           }
           const status = ok ? 'ok' : 'fail';
-          // 完整保留工具结果（含换行、不截断）——展示层按行折叠，展开时仍可看全。
-          // 若这里截断，折叠后再展开也无法恢复被切掉的语义。
-          const summary = (result || '').trim();
-          const chip = {
-            key: nextId++,
-            tool,
-            status,
-            summary,
-          };
+          const chip = { key: nextId++, tool, status };
           if (idx >= 0) chips[idx] = chip; else chips.push(chip);
-          return { ...a, chips };
+          return { ...a, chips, pullProgress: tool === 'pull_hub_image' ? null : a.pullProgress };
         });
       },
       onDone: (reply) => {
-        patchLastAssistant((a) => ({ ...a, content: reply || a.content, streaming: false }));
+        patchLastAssistant((a) => ({ ...a, content: reply || a.content,
+          chips: settleRunningChips(a.chips), streaming: false }));
       },
       onError: (err) => {
         setError(err.message || String(err));
-        patchLastAssistant((a) => ({ ...a, streaming: false }));
+        patchLastAssistant((a) => ({ ...a, chips: settleRunningChips(a.chips), streaming: false }));
       },
       onClose: () => {
         setSending(false);
         sendingRef.current = false;
         setCancelling(false);
-        patchLastAssistant((a) => (a.streaming ? { ...a, streaming: false } : a));
+        patchLastAssistant((a) => ({ ...a, chips: settleRunningChips(a.chips), streaming: false }));
       },
     });
   };
@@ -240,7 +191,7 @@ const AgentChat = () => {
   // cancel_check / INTERRUPT_REPLY）。若请求恰在自然结束瞬间被点停止，
   // cancel 幂等返回 200，无副作用；onDone/onClose 照常落定气泡。
   const handleStop = async () => {
-    if (!sending || cancelling) return;
+    if ((!sending && !leftover) || cancelling) return;
     setCancelling(true);
     setError('');
     try {
@@ -282,7 +233,7 @@ const AgentChat = () => {
               </button>
             </div>
             <p style={{ fontSize: 12, color: '#aaa', marginTop: 4 }}>
-              中：我能查询/创建/启动/停止/删除/重建你的容器，设置清理保护。删除容器会销毁容器本体（工作区保留）。
+              中：我能查询/创建/启动/停止/删除/重建你的容器，设置清理保护。管理员还可以搜索和拉取 Docker Hub 镜像。删除容器会销毁容器本体（工作区保留）。
             </p>
 
             <div className="chat-list" ref={listRef}>
@@ -294,6 +245,13 @@ const AgentChat = () => {
                   <div className="chat-bubble">
                     <div style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>
                     {m.streaming && <span className="chat-typing" />}
+                    {m.pullProgress !== undefined && m.pullProgress !== null && (
+                      <div className="pull-progress" role="progressbar" aria-label="镜像拉取进度"
+                        aria-valuenow={m.pullProgress} aria-valuemin="0" aria-valuemax="100">
+                        <div className="pull-progress-bar" style={{ width: `${m.pullProgress}%` }} />
+                        <span>镜像拉取 {m.pullProgress}%</span>
+                      </div>
+                    )}
                     {m.role === 'assistant' && m.chips.length > 0 && (
                       <div className="chat-chips">
                         {m.chips.map((c) => <ToolChip key={c.key} c={c} />)}
@@ -302,12 +260,13 @@ const AgentChat = () => {
                   </div>
                 </div>
               ))}
-              {/* 上一条请求离开页时被中断、后端仍在收尾：先给一条进行中气泡占位，
-                  等 gate 释放后 loadSession 会把它换成落库的 请求中断 真实回复。 */}
+              {/* 导航回来时显示后台任务，完成后以落库回复替换。 */}
               {leftover && !sending && (
                 <div className="chat-msg chat-assistant">
                   <div className="chat-bubble">
-                    <div style={{ whiteSpace: 'pre-wrap' }}>正在停止上一条请求…</div>
+                    <div style={{ whiteSpace: 'pre-wrap' }}>
+                      {cancelling ? '正在停止后台请求…' : '上一条请求正在后台执行…'}
+                    </div>
                     <span className="chat-typing" />
                   </div>
                 </div>
@@ -328,8 +287,8 @@ const AgentChat = () => {
                 disabled={sending || leftover}
               />
               {sending || leftover ? (
-                <button className="btn btn-danger" onClick={handleStop} disabled={cancelling || leftover}>
-                  {cancelling || leftover ? '正在停止…' : '停止'}
+                <button className="btn btn-danger" onClick={handleStop} disabled={cancelling}>
+                  {cancelling ? '正在停止…' : '停止'}
                 </button>
               ) : (
                 <button className="btn btn-primary" onClick={handleSend} disabled={!input.trim()}>

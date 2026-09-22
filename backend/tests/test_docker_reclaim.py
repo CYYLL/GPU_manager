@@ -34,6 +34,25 @@ def test_per_container_estimate_unknown_cid_zero():
     assert per_container_estimate(DF, "zzz") == 0
 
 
+def test_docker_engine_field_names_and_states():
+    cid = "f" * 64
+    df = {
+        "Containers": [
+            {"Id": cid, "ImageID": "sha256:tagged", "SizeRw": 6 * 1024 ** 3,
+             "State": "exited"},
+            {"Id": "g" * 64, "ImageID": "sha256:other", "SizeRw": 9 * 1024 ** 3,
+             "State": "running"},
+            {"Id": "h" * 64, "ImageID": "sha256:other", "SizeRw": 2 * 1024 ** 3,
+             "State": "paused"},
+        ],
+        "Images": [{"Id": "sha256:tagged", "RepoTags": ["example:latest"],
+                    "Size": 20 * 1024 ** 3}],
+    }
+    assert reclaim_breakdown(df) == (6 * 1024 ** 3, 0, 0)
+    # A tagged image is not removed by image_prune, so only its writable layer counts.
+    assert per_container_estimate(df, cid) == 6 * 1024 ** 3
+
+
 def test_image_prune_returns_space_reclaimed():
     dr = dr_mod.DockerRunner()
     dr.client = mock.Mock()

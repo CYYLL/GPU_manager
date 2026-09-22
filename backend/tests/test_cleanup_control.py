@@ -137,14 +137,36 @@ def test_dry_run_docker_trigger_no_escalation_alert(monkeypatch, db, rule_llm):
     u = _u(db)
     _stopped(db, u, "e" * 64)
     runner = mock.Mock()
-    runner.df.return_value = {"Containers": [{"ID": "e" * 64, "ImageID": None,
-                                              "SizeRw": 1 * 1024 ** 3}],
+    runner.df.return_value = {"Containers": [{"Id": "e" * 64, "ImageID": None,
+                                              "SizeRw": 1 * 1024 ** 3, "State": "exited"}],
                               "Images": [], "BuildCache": []}
     runner.is_container_running.return_value = False
     with mock.patch.object(cleanup.shutil, "disk_usage", return_value=_disk_usage(30)):
         out = cleanup.run_cleanup_cycle(runner=runner, db=db, llm_client=rule_llm)
     assert out["removed"] == 1
     assert out.get("escalated") is False
+    assert db.query(models.AdminAlert).count() == 0
+
+
+def test_real_docker_df_reclaim_does_not_raise_false_capacity_alert(monkeypatch, db, rule_llm):
+    _params(monkeypatch, cleanup.CleanupParams(
+        disk_threshold=90, container_reclaim_trigger_gb=1,
+        min_effective_free_gb=5))
+    user = _u(db)
+    inst = _stopped(db, user, "f" * 64)
+    runner = mock.Mock()
+    runner.df.return_value = {"Containers": [{
+        "Id": inst.container_id, "ImageID": "sha256:tagged",
+        "SizeRw": 6 * 1024 ** 3, "State": "exited"}],
+        "Images": [{"Id": "sha256:tagged", "RepoTags": ["basic:v1"],
+                    "Size": 20 * 1024 ** 3}], "BuildCache": []}
+    runner.is_container_running.return_value = False
+    runner.remove_container.return_value = (True, "removed")
+    with mock.patch.object(cleanup.shutil, "disk_usage", return_value=_disk_usage(30)):
+        out = cleanup.run_cleanup_cycle(runner=runner, db=db, llm_client=rule_llm)
+    assert out["removed"] == 1
+    assert out["source_freed"] == 6 * 1024 ** 3
+    assert out["escalated"] is False
     assert db.query(models.AdminAlert).count() == 0
 
 

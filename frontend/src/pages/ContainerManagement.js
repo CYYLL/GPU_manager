@@ -5,6 +5,9 @@ import AppHeader from '../components/AppHeader';
 const ContainerManagement = () => {
   const [containers, setContainers] = useState([]);
   const [images, setImages] = useState([]);
+  const [availableImages, setAvailableImages] = useState([]);
+  const [imageError, setImageError] = useState('');
+  const [presetPending, setPresetPending] = useState({});
   const [user, setUser] = useState(null);
   const [hostIp, setHostIp] = useState(null);
   const [form, setForm] = useState({
@@ -28,6 +31,7 @@ const ContainerManagement = () => {
   useEffect(() => {
     fetchContainers();
     fetchImages();
+    fetchAvailableImages();
     api.get('/api/host-ip').then(res => setHostIp(res.data.host_ip)).catch(() => {});
     const userStr = localStorage.getItem('user');
     if (userStr) setUser(JSON.parse(userStr));
@@ -44,14 +48,49 @@ const ContainerManagement = () => {
     }
   };
 
+  const fetchAvailableImages = async () => {
+    try {
+      const res = await api.get('/api/images/available');
+      setAvailableImages(res.data);
+      setImageError('');
+    } catch (err) {
+      setImageError(err.response?.data?.detail || '无法获取本地镜像列表');
+    }
+  };
+
+  const handlePresetToggle = async (image) => {
+    setPresetPending((prev) => ({ ...prev, [image.image_ref]: true }));
+    try {
+      await api.put('/api/images/presets', {
+        image_ref: image.image_ref, selected: !image.selected,
+      });
+      await Promise.all([fetchImages(), fetchAvailableImages()]);
+      if (image.selected && String(form.image_id) === String(image.id)) {
+        setForm((prev) => ({ ...prev, image_id: '' }));
+      }
+    } catch (err) {
+      alert(err.response?.data?.detail || '更新镜像预设失败');
+    } finally {
+      setPresetPending((prev) => {
+        const next = { ...prev };
+        delete next[image.image_ref];
+        return next;
+      });
+    }
+  };
+
   const handleStart = async (e) => {
     e.preventDefault();
     if (!form.image_id) return alert('Please select an image');
+    const gpuCount = Number(form.gpu_count);
+    if (!Number.isInteger(gpuCount) || gpuCount < 1 || gpuCount > 4) {
+      return alert('系统不支持创建 0 张 GPU 的容器，请设置 1 至 4 张 GPU');
+    }
     setLoading(true);
     try {
       await api.post('/api/containers/start', {
         image_id: parseInt(form.image_id),
-        gpu_count: form.gpu_count,
+        gpu_count: gpuCount,
         cpu_limit: form.cpu_limit ? parseFloat(form.cpu_limit) : null,
         memory_limit: form.memory_limit ? parseInt(form.memory_limit) : null,
       });
@@ -133,8 +172,8 @@ const ContainerManagement = () => {
     });
   };
 
-  const statusColor = (s) => (
-    s === 'running' ? '#52c41a' : s === 'removed' ? '#faad14' : s === 'error' ? '#ff4d4f' : '#888'
+  const statusTone = (status) => (
+    ['running', 'stopped', 'removed', 'error'].includes(status) ? status : 'other'
   );
 
   const selectedImage = images.find(img => img.id === parseInt(form.image_id));
@@ -142,7 +181,40 @@ const ContainerManagement = () => {
   return (
     <div>
       <AppHeader user={user} />
-      <div className="content">
+      <div className="content containers-page">
+        <div className="card">
+          <h2>我的镜像预设</h2>
+          <p style={{ color: '#888', fontSize: 13, marginTop: 8 }}>
+            从服务器已有镜像中选择。加入或移出只影响你的容器创建列表；拉取和删除实际镜像由管理员操作。
+          </p>
+          {imageError && <p style={{ color: '#ff4d4f', marginTop: 12 }}>{imageError}</p>}
+          {!imageError && availableImages.length === 0 && (
+            <p style={{ color: '#888', marginTop: 12 }}>本地暂无镜像。</p>
+          )}
+          {availableImages.length > 0 && (
+            <div className="containers-table-scroll" style={{ marginTop: 16 }}>
+              <table className="containers-presets-table">
+                <thead><tr><th>镜像</th><th>大小</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>
+                  {availableImages.map((image) => (
+                    <tr key={image.image_ref}>
+                      <td className="containers-image-ref">{image.image_ref}</td>
+                      <td>{image.size_bytes == null ? '-' : `${(image.size_bytes / (1024 ** 3)).toFixed(2)} GiB`}</td>
+                      <td>{image.selected ? '已加入' : '未加入'}</td>
+                      <td><button
+                        className={`btn ${image.selected ? 'btn-preset-remove' : 'btn-preset-add'}`}
+                        onClick={() => handlePresetToggle(image)}
+                        disabled={!!presetPending[image.image_ref]}
+                        aria-pressed={image.selected}>
+                        {presetPending[image.image_ref] ? '处理中…' : image.selected ? '− 移出我的预设' : '+ 加入我的预设'}
+                      </button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
         <div className="card">
           <h2>Register New Container</h2>
           <form onSubmit={handleStart} style={{ marginTop: 16 }}>
@@ -168,7 +240,7 @@ const ContainerManagement = () => {
             <div className="form-group">
               <label>GPU 数量:</label>
               <input type="number" min="1" max="4" value={form.gpu_count}
-                onChange={(e) => setForm({ ...form, gpu_count: parseInt(e.target.value) || 1 })} />
+                onChange={(e) => setForm({ ...form, gpu_count: e.target.value })} />
             </div>
             <div className="form-group">
               <label>CPU 限制 (核心数, 可选):</label>
@@ -197,12 +269,14 @@ const ContainerManagement = () => {
           {containers.length === 0 ? (
             <p style={{ color: '#888' }}>No containers running.</p>
           ) : (
-            <table>
+            <div className="containers-table-scroll" role="region" aria-label="容器列表" tabIndex="0">
+              <table className="containers-list-table">
               <thead>
                 <tr>
                   <th>ID</th>
                   <th>Image</th>
                   <th>服务器地址</th>
+                  <th>SSH 用户</th>
                   <th>GPUs</th>
                   <th>CPU</th>
                   <th>Memory</th>
@@ -216,16 +290,19 @@ const ContainerManagement = () => {
                 {containers.map(c => (
                   <tr key={c.id}>
                     <td style={{ fontFamily: 'monospace' }}>{c.container_id}</td>
-                    <td>{c.image}</td>
-                    <td style={{ fontFamily: 'monospace' }}>
+                    <td className="containers-image-ref" title={c.image}>{c.image}</td>
+                    <td className="containers-address">
                       {c.assigned_port ? `${hostIp || window.location.hostname}:${c.assigned_port}` : '-'}
+                    </td>
+                    <td style={{ fontFamily: 'monospace' }}>
+                      {c.ssh_username || '未确认'}
                     </td>
                     <td>{c.gpu_count} (IDs: {c.gpu_ids?.join(',')})</td>
                     <td>{c.cpu_limit ? `${c.cpu_limit} cores` : 'Unlimited'}</td>
                     <td>{c.memory_limit ? `${c.memory_limit} MB` : 'Unlimited'}</td>
                     <td>
                       {c.access_password ? (
-                        <span style={{ cursor: 'pointer', fontFamily: 'monospace', fontSize: 13 }}
+                        <button type="button" className="container-password-copy"
                           onClick={() => {
                             const el = document.createElement('textarea');
                             el.value = c.access_password;
@@ -237,14 +314,14 @@ const ContainerManagement = () => {
                             document.body.removeChild(el);
                             alert('Password copied!');
                           }}
-                          title="Click to copy password">
-                          {'●'.repeat(8)}
-                        </span>
+                          title="复制访问密码" aria-label="复制访问密码">
+                          复制
+                        </button>
                       ) : '-'}
                     </td>
                     <td>
-                      <span className="status-badge" style={{ background: statusColor(c.status) }}>
-                        {c.status === 'removed' ? 'removed' : c.status}
+                      <span className={`container-status container-status-${statusTone(c.status)}`}>
+                        {c.status}
                       </span>
                     </td>
                     <td>
@@ -259,37 +336,37 @@ const ContainerManagement = () => {
                       </button>
                     </td>
                     <td>
-                      {c.status === 'removed' && (
-                        <button className="btn btn-primary" onClick={() => handleRebuild(c.id)}
-                          disabled={!!processingIds[c.id]}
-                          style={{ marginRight: 4 }}>
-                          {processingIds[c.id] === 'rebuilding' ? 'Rebuilding...' : 'Rebuild'}
+                      <div className="containers-row-actions">
+                        {c.status === 'removed' && (
+                          <button className="btn btn-primary" onClick={() => handleRebuild(c.id)}
+                            disabled={!!processingIds[c.id]}>
+                            {processingIds[c.id] === 'rebuilding' ? 'Rebuilding...' : 'Rebuild'}
+                          </button>
+                        )}
+                        {c.status === 'running' && (
+                          <button className="btn btn-danger" onClick={() => handleStop(c.id)}
+                            disabled={!!processingIds[c.id]}>
+                            {processingIds[c.id] === 'stopping' ? 'Stopping...' : 'Stop'}
+                          </button>
+                        )}
+                        {c.status === 'stopped' && (
+                          <button className="btn btn-primary" onClick={() => handleRestart(c.id)}
+                            disabled={!!processingIds[c.id]}>
+                            {processingIds[c.id] === 'starting' ? 'Starting...' : 'Start'}
+                          </button>
+                        )}
+                        <button className="btn btn-secondary"
+                          onClick={() => handleDelete(c.id)}
+                          disabled={!!processingIds[c.id]}>
+                          {processingIds[c.id] === 'deleting' ? 'Deleting...' : 'Delete'}
                         </button>
-                      )}
-                      {c.status === 'running' && (
-                        <button className="btn btn-danger" onClick={() => handleStop(c.id)}
-                          disabled={!!processingIds[c.id]}
-                          style={{ marginRight: 4 }}>
-                          {processingIds[c.id] === 'stopping' ? 'Stopping...' : 'Stop'}
-                        </button>
-                      )}
-                      {c.status === 'stopped' && (
-                        <button className="btn btn-primary" onClick={() => handleRestart(c.id)}
-                          disabled={!!processingIds[c.id]}
-                          style={{ marginRight: 4 }}>
-                          {processingIds[c.id] === 'starting' ? 'Starting...' : 'Start'}
-                        </button>
-                      )}
-                      <button className="btn btn-secondary"
-                        onClick={() => handleDelete(c.id)}
-                        disabled={!!processingIds[c.id]}>
-                        {processingIds[c.id] === 'deleting' ? 'Deleting...' : 'Delete'}
-                      </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+              </table>
+            </div>
           )}
         </div>
       </div>

@@ -21,6 +21,18 @@ def _make_runner(stop_errors=None):
     return runner, container
 
 
+def test_docker_status_error_is_unknown_not_stopped():
+    runner, container = _make_runner()
+    container.status = "running"
+    assert runner.is_container_running("abc123") is True
+    container.status = "exited"
+    assert runner.is_container_running("abc123") is False
+    container.status = "restarting"
+    assert runner.is_container_running("abc123") is None
+    runner.client.containers.get.side_effect = RuntimeError("daemon unavailable")
+    assert runner.is_container_running("abc123") is None
+
+
 # ── 1. stop_container 重试 ────────────────────────────────────────────────
 
 

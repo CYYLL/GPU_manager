@@ -21,12 +21,12 @@ function authHeaders(extra = {}) {
  * Send one chat message and consume the SSE stream.
  * @param {object} opts
  *   message: string
- *   onText(delta), onToolUse({tool,input}), onToolResult({tool,ok,result})
+ *   onText(delta), onToolUse({tool,input}), onToolProgress({tool,percent,message}), onToolResult({tool,ok,result})
  *   onDone(reply, toolTrace), onError(err), onClose()
  *   signal: optional AbortSignal
  */
 export async function streamChat(opts) {
-  const { message, onText, onToolUse, onToolResult, onDone, onError, onClose, signal } = opts;
+  const { message, onText, onToolUse, onToolProgress, onToolResult, onDone, onError, onClose, signal } = opts;
   let res;
   try {
     res = await fetch(`${BASE}/api/agent/chat/stream`, {
@@ -71,10 +71,10 @@ export async function streamChat(opts) {
         const frame = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 2);
         if (!frame) continue;
-        dispatchFrame(frame, { onText, onToolUse, onToolResult, onDone, onError });
+        dispatchFrame(frame, { onText, onToolUse, onToolProgress, onToolResult, onDone, onError });
       }
     }
-    if (buffer.trim()) dispatchFrame(buffer.trim(), { onText, onToolUse, onToolResult, onDone, onError });
+    if (buffer.trim()) dispatchFrame(buffer.trim(), { onText, onToolUse, onToolProgress, onToolResult, onDone, onError });
   } catch (err) {
     if (err.name !== 'AbortError') onError && onError(err);
   } finally {
@@ -82,7 +82,7 @@ export async function streamChat(opts) {
   }
 }
 
-function dispatchFrame(frame, { onText, onToolUse, onToolResult, onDone, onError }) {
+function dispatchFrame(frame, { onText, onToolUse, onToolProgress, onToolResult, onDone, onError }) {
   if (!frame.startsWith('data:')) return; // ignore comments/keep-alives
   const payload = frame.slice(5).trim();
   if (!payload) return;
@@ -101,6 +101,9 @@ function dispatchFrame(frame, { onText, onToolUse, onToolResult, onDone, onError
       break;
     case 'tool_result':
       onToolResult && onToolResult({ tool: ev.tool, ok: ev.ok, result: ev.result });
+      break;
+    case 'tool_progress':
+      onToolProgress && onToolProgress({ tool: ev.tool, percent: ev.percent, message: ev.message });
       break;
     case 'done':
       onDone && onDone(ev.reply, ev.tool_trace || []);
